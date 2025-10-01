@@ -10,21 +10,24 @@ class LlamaService {
   /// Initialize the local LLM service
   Future<bool> initialize({Function(double)? onDownloadProgress}) async {
     try {
-      // Check if model is already downloaded
+      // Check if both model files are already downloaded
       final isDownloaded = await _downloader.isModelDownloaded();
 
-      String modelPath;
+      Map<String, String> modelPaths;
       if (!isDownloaded) {
-        // Download model with progress callback
-        modelPath = await _downloader.downloadModel(
+        // Download both model files with progress callback
+        modelPaths = await _downloader.downloadModel(
           onProgress: onDownloadProgress ?? (progress) {},
         );
       } else {
-        modelPath = await _downloader.getModelPath();
+        modelPaths = await _downloader.getModelPaths();
       }
 
-      // Initialize the LLM with model path (mmproj only for vision)
-      _isInitialized = await _localLlm.initialize(modelPath);
+      // Initialize the LLM with both model paths
+      _isInitialized = await _localLlm.initialize(
+        modelPaths['model']!,
+        modelPaths['mmproj']!,
+      );
       return _isInitialized;
     } catch (e) {
       print('Failed to initialize LlamaService: $e');
