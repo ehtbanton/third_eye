@@ -44,6 +44,18 @@ dependencies:
   # Path utilities
   path_provider: ^2.1.2
 
+  # llama.cpp for Flutter - local LLM inference
+  fllama:
+    git:
+      url: https://github.com/Telosnex/fllama.git
+      ref: main
+
+  # File downloading
+  dio: ^5.4.0
+
+  # Permission handling
+  permission_handler: ^11.3.0
+
   # Explicitly constrain plugin version for SDK 34 compatibility
   flutter_plugin_android_lifecycle: 2.0.17
 

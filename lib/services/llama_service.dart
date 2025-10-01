@@ -1,74 +1,67 @@
-import 'dart:convert';
-import 'package:http/http.dart' as http;
 import '../models/image_description.dart';
+import 'local_llm_service.dart';
+import 'model_downloader.dart';
 
 class LlamaService {
-  final String baseUrl;
-  final http.Client _client;
+  final LocalLlmService _localLlm = LocalLlmService();
+  final ModelDownloader _downloader = ModelDownloader();
+  bool _isInitialized = false;
 
-  LlamaService({
-    this.baseUrl = 'http://localhost:8080',
-    http.Client? client,
-  }) : _client = client ?? http.Client();
-
-  /// Send image to llama.cpp server for description
-  Future<LlamaResponse> describeImage(String base64Image) async {
+  /// Initialize the local LLM service
+  Future<bool> initialize({Function(double)? onDownloadProgress}) async {
     try {
-      final request = LlamaRequest(
-        prompt:
-            'USER: [img-10]Describe this image in detail.\nASSISTANT:',
-        imageData: base64Image,
-        maxTokens: 512,
-        temperature: 0.7,
-      );
+      // Check if model is already downloaded
+      final isDownloaded = await _downloader.isModelDownloaded();
 
-      final response = await _client
-          .post(
-            Uri.parse('$baseUrl/completion'),
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode(request.toJson()),
-          )
-          .timeout(
-            const Duration(seconds: 60),
-            onTimeout: () {
-              throw Exception('Request timeout - server took too long to respond');
-            },
-          );
-
-      if (response.statusCode == 200) {
-        final jsonResponse = jsonDecode(response.body) as Map<String, dynamic>;
-        return LlamaResponse.fromJson(jsonResponse);
-      } else {
-        return LlamaResponse.error(
-          'Server error: ${response.statusCode} - ${response.body}',
+      String modelPath;
+      if (!isDownloaded) {
+        // Download model with progress callback
+        modelPath = await _downloader.downloadModel(
+          onProgress: onDownloadProgress ?? (progress) {},
         );
+      } else {
+        modelPath = await _downloader.getModelPath();
       }
-    } catch (e) {
-      return LlamaResponse.error('Failed to connect to LLM server: $e');
-    }
-  }
 
-  /// Check if the llama.cpp server is running and accessible
-  Future<bool> checkServerHealth() async {
-    try {
-      final response = await _client
-          .get(Uri.parse('$baseUrl/health'))
-          .timeout(const Duration(seconds: 5));
-      return response.statusCode == 200;
+      // Initialize the LLM with model path (mmproj only for vision)
+      _isInitialized = await _localLlm.initialize(modelPath);
+      return _isInitialized;
     } catch (e) {
+      print('Failed to initialize LlamaService: $e');
       return false;
     }
   }
 
-  /// Update server URL
-  void updateServerUrl(String newUrl) {
-    // This would require creating a new instance in production
-    // Kept simple for this implementation
+  /// Send image file path to local LLM for description
+  Future<LlamaResponse> describeImage(String imagePath) async {
+    if (!_isInitialized) {
+      return LlamaResponse.error(
+        'LLM not initialized. Please initialize the service first.',
+      );
+    }
+
+    try {
+      final description = await _localLlm.describeImage(imagePath);
+      return LlamaResponse(
+        content: description,
+        success: true,
+      );
+    } catch (e) {
+      return LlamaResponse.error('Failed to generate description: $e');
+    }
+  }
+
+  /// Check if the local LLM is ready
+  Future<bool> checkServerHealth() async {
+    return _isInitialized && _localLlm.isInitialized;
+  }
+
+  /// Check if model needs to be downloaded
+  Future<bool> isModelDownloaded() async {
+    return await _downloader.isModelDownloaded();
   }
 
   void dispose() {
-    _client.close();
+    _localLlm.dispose();
   }
 }
