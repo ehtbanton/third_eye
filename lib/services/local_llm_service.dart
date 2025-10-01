@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:fllama/fllama.dart';
+// TEMPORARILY DISABLED: Requires x86-64 host for NDK compilation
+// import 'package:fllama/fllama.dart';
 
 class LocalLlmService {
   bool _isInitialized = false;
@@ -68,29 +69,30 @@ class LocalLlmService {
       // Create message with base64-encoded image (HTML img tag format)
       final messageText = '<img src="data:image/jpeg;base64,$base64Image">\n\nDescribe this image in one sentence.';
 
-      print('Creating OpenAiRequest...');
-      final request = OpenAiRequest(
-        maxTokens: 50, // Short for one sentence
-        messages: [
-          Message(Role.user, messageText),
-        ],
-        modelPath: _modelPath!,
-        mmprojPath: _mmprojPath!,
-        temperature: 0.7,
-        topP: 0.9,
-        numGpuLayers: 0,
-        contextSize: 2048,
-      );
+      print('LOCAL LLM TEMPORARILY DISABLED - Returning placeholder');
+      // TEMPORARILY DISABLED: Requires x86-64 host for NDK compilation
+      // final request = OpenAiRequest(
+      //   maxTokens: 50,
+      //   messages: [
+      //     Message(Role.user, messageText),
+      //   ],
+      //   modelPath: _modelPath!,
+      //   mmprojPath: _mmprojPath!,
+      //   temperature: 0.7,
+      //   topP: 0.9,
+      //   numGpuLayers: 0,
+      //   contextSize: 2048,
+      // );
+      //
+      // fllamaChat(request, (response, partialResponse, done) {
+      //   result = response;
+      //   if (done) {
+      //     completer.complete(result);
+      //   }
+      // });
 
-      print('Calling fllamaChat...');
-      fllamaChat(request, (response, partialResponse, done) {
-        print('fllamaChat callback: response="$response", done=$done');
-        result = response;
-        if (done) {
-          print('Generation complete! Final result: $result');
-          completer.complete(result);
-        }
-      });
+      // Return placeholder description since local LLM is disabled
+      completer.complete('[Local LLM temporarily disabled - Please use remote LLM mode]');
 
       // Wait for generation to complete
       final finalResult = await completer.future;
