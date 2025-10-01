@@ -61,15 +61,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       _downloadProgress = 0.0;
     });
 
-    final success = await _llamaService.initialize(
-      onDownloadProgress: (progress) {
-        if (mounted) {
-          setState(() {
-            _downloadProgress = progress;
-          });
-        }
-      },
-    );
+    // Initialize Gemini API (no model download needed!)
+    final success = await _llamaService.initialize();
 
     if (mounted) {
       setState(() {
@@ -80,8 +73,16 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       if (success) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('AI model ready!'),
+            content: Text('Gemini API ready!'),
             duration: Duration(seconds: 2),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to initialize: Check your API key in .env'),
+            duration: Duration(seconds: 5),
+            backgroundColor: Colors.red,
           ),
         );
       }
@@ -198,30 +199,23 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
               const SizedBox(height: 24),
 
-              // Model initialization indicator
+              // API initialization indicator
               if (_isInitializing)
                 Card(
                   color: Colors.blue[50],
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
+                  child: const Padding(
+                    padding: EdgeInsets.all(16.0),
                     child: Column(
                       children: [
-                        const Text(
-                          'Initializing AI Model...',
+                        Text(
+                          'Connecting to Gemini API...',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
-                        const SizedBox(height: 12),
-                        LinearProgressIndicator(value: _downloadProgress),
-                        const SizedBox(height: 8),
-                        Text(
-                          _downloadProgress > 0
-                              ? 'Downloading: ${(_downloadProgress * 100).toStringAsFixed(0)}%'
-                              : 'Loading...',
-                          style: const TextStyle(fontSize: 14),
-                        ),
+                        SizedBox(height: 12),
+                        CircularProgressIndicator(),
                       ],
                     ),
                   ),
@@ -279,7 +273,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
               const SizedBox(height: 16),
 
-              // Server status info
+              // API status info
               if (!_serverAvailable && !_isInitializing)
                 Card(
                   color: Colors.orange[100],
@@ -291,7 +285,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                         const SizedBox(width: 8),
                         const Expanded(
                           child: Text(
-                            'AI model failed to initialize. Please restart the app.',
+                            'Gemini API not connected. Check your API key in .env file.',
                             style: TextStyle(fontSize: 14),
                           ),
                         ),

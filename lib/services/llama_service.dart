@@ -1,33 +1,15 @@
 import '../models/image_description.dart';
 import 'local_llm_service.dart';
-import 'model_downloader.dart';
 
 class LlamaService {
   final LocalLlmService _localLlm = LocalLlmService();
-  final ModelDownloader _downloader = ModelDownloader();
   bool _isInitialized = false;
 
-  /// Initialize the local LLM service
+  /// Initialize the Gemini API service
   Future<bool> initialize({Function(double)? onDownloadProgress}) async {
     try {
-      // Check if both model files are already downloaded
-      final isDownloaded = await _downloader.isModelDownloaded();
-
-      Map<String, String> modelPaths;
-      if (!isDownloaded) {
-        // Download both model files with progress callback
-        modelPaths = await _downloader.downloadModel(
-          onProgress: onDownloadProgress ?? (progress) {},
-        );
-      } else {
-        modelPaths = await _downloader.getModelPaths();
-      }
-
-      // Initialize the LLM with both model paths
-      _isInitialized = await _localLlm.initialize(
-        modelPaths['model']!,
-        modelPaths['mmproj']!,
-      );
+      // Initialize Gemini API (no downloads needed)
+      _isInitialized = await _localLlm.initialize('', '');
       return _isInitialized;
     } catch (e) {
       print('Failed to initialize LlamaService: $e');
@@ -59,9 +41,9 @@ class LlamaService {
     return _isInitialized && _localLlm.isInitialized;
   }
 
-  /// Check if model needs to be downloaded
+  /// Check if model needs to be downloaded (always true for API)
   Future<bool> isModelDownloaded() async {
-    return await _downloader.isModelDownloaded();
+    return true; // API doesn't need downloads
   }
 
   void dispose() {

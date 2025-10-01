@@ -1,103 +1,75 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-// TEMPORARILY DISABLED: Requires x86-64 host for NDK compilation
-// import 'package:fllama/fllama.dart';
+import 'package:google_generative_ai/google_generative_ai.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class LocalLlmService {
+  GenerativeModel? _model;
   bool _isInitialized = false;
-  String? _mmprojPath;
-  String? _modelPath;
 
-  /// Initialize the LLM service with both model paths
+  /// Initialize the Gemini API service
   Future<bool> initialize(String modelPath, String mmprojPath) async {
     try {
-      if (!await File(modelPath).exists()) {
-        print('Warning: Model file not found at: $modelPath');
-        print('Download will start on first use.');
+      // Load API key from environment
+      final apiKey = dotenv.env['GEMINI_API_KEY'];
+      if (apiKey == null || apiKey.isEmpty || apiKey == 'your_api_key_here') {
+        print('ERROR: GEMINI_API_KEY not set in .env file');
         return false;
       }
 
-      if (!await File(mmprojPath).exists()) {
-        print('Warning: Mmproj file not found at: $mmprojPath');
-        print('Download will start on first use.');
-        return false;
-      }
+      // Initialize Gemini model (2.5 Flash with vision support)
+      _model = GenerativeModel(
+        model: 'gemini-2.0-flash-exp',
+        apiKey: apiKey,
+      );
 
-      _modelPath = modelPath;
-      _mmprojPath = mmprojPath;
       _isInitialized = true;
+      print('Gemini API initialized successfully');
       return true;
     } catch (e) {
-      print('Failed to initialize LLM: $e');
+      print('Failed to initialize Gemini API: $e');
       return false;
     }
   }
 
-  /// Generate a description for an image using Moondream2
+  /// Generate a description for an image using Gemini
   Future<String> describeImage(String imagePath) async {
     print('describeImage called with: $imagePath');
 
-    if (_modelPath == null || _mmprojPath == null) {
-      print('ERROR: Model not initialized. _modelPath=$_modelPath, _mmprojPath=$_mmprojPath');
+    if (!_isInitialized || _model == null) {
+      print('ERROR: Model not initialized');
       throw Exception('Model not initialized. Please initialize first.');
     }
 
-    print('Using modelPath: $_modelPath');
-    print('Using mmprojPath: $_mmprojPath');
-
     try {
-      final completer = Completer<String>();
-      String result = '';
-
-      // Read image and convert to base64
+      // Read image file
       print('Reading image file: $imagePath');
       final imageFile = File(imagePath);
-      var imageBytes = await imageFile.readAsBytes();
-      print('Original image size: ${imageBytes.length} bytes');
-
-      // Limit image size to 200KB to avoid memory issues
-      // The image is already scaled by image_picker, but let's be extra safe
-      if (imageBytes.length > 200 * 1024) {
-        print('Image too large, using first 200KB only');
-        imageBytes = imageBytes.sublist(0, 200 * 1024);
+      if (!await imageFile.exists()) {
+        throw Exception('Image file not found: $imagePath');
       }
 
-      final base64Image = base64Encode(imageBytes);
-      print('Base64 encoded, length: ${base64Image.length} chars');
+      final imageBytes = await imageFile.readAsBytes();
+      print('Image size: ${imageBytes.length} bytes');
 
-      // Create message with base64-encoded image (HTML img tag format)
-      final messageText = '<img src="data:image/jpeg;base64,$base64Image">\n\nDescribe this image in one sentence.';
+      // Create image part for Gemini
+      final imagePart = DataPart('image/jpeg', imageBytes);
 
-      print('LOCAL LLM TEMPORARILY DISABLED - Returning placeholder');
-      // TEMPORARILY DISABLED: Requires x86-64 host for NDK compilation
-      // final request = OpenAiRequest(
-      //   maxTokens: 50,
-      //   messages: [
-      //     Message(Role.user, messageText),
-      //   ],
-      //   modelPath: _modelPath!,
-      //   mmprojPath: _mmprojPath!,
-      //   temperature: 0.7,
-      //   topP: 0.9,
-      //   numGpuLayers: 0,
-      //   contextSize: 2048,
-      // );
-      //
-      // fllamaChat(request, (response, partialResponse, done) {
-      //   result = response;
-      //   if (done) {
-      //     completer.complete(result);
-      //   }
-      // });
+      // Create prompt
+      final prompt = TextPart('Describe this image in one sentence.');
 
-      // Return placeholder description since local LLM is disabled
-      completer.complete('[Local LLM temporarily disabled - Please use remote LLM mode]');
+      // Generate content with image
+      print('Sending request to Gemini API...');
+      final response = await _model!.generateContent([
+        Content.multi([prompt, imagePart])
+      ]);
 
-      // Wait for generation to complete
-      final finalResult = await completer.future;
-      print('fllamaChat completed. Result: $finalResult');
-      return finalResult.trim().isNotEmpty ? finalResult.trim() : 'No description generated';
+      final text = response.text;
+      print('Gemini response: $text');
+
+      return text?.trim().isNotEmpty == true
+          ? text!.trim()
+          : 'No description generated';
     } catch (e) {
       print('ERROR in describeImage: $e');
       throw Exception('Failed to generate description: $e');
@@ -109,8 +81,8 @@ class LocalLlmService {
 
   /// Dispose of resources
   Future<void> dispose() async {
-    _modelPath = null;
-    _mmprojPath = null;
+    _model = null;
     _isInitialized = false;
+    print('Gemini service disposed');
   }
 }
