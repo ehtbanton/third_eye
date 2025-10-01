@@ -7,8 +7,7 @@ plugins {
 
 android {
     namespace = "com.example.third_eye"
-    compileSdk = 34
-    ndkVersion = "25.1.8937393"
+    compileSdk = 36
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
@@ -31,11 +30,23 @@ android {
     }
 
     buildTypes {
+        debug {
+            ndk {
+                debugSymbolLevel 'NONE'
+            }
+        }
         release {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.debug
         }
+    }
+
+    packagingOptions {
+        doNotStrip "*/arm64-v8a/*.so"
+        doNotStrip "*/armeabi-v7a/*.so"
+        doNotStrip "*/x86/*.so"
+        doNotStrip "*/x86_64/*.so"
     }
 }
 
