@@ -48,3 +48,6 @@ app.*.map.json
 
 # Local configuration (machine-specific paths)
 android/local.properties
+
+# Differing build environment
+android/gradle.properties
