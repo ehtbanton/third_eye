@@ -45,3 +45,6 @@ app.*.map.json
 
 # Security
 .env
+
+# Local configuration (machine-specific paths)
+android/local.properties
