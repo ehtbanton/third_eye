@@ -29,26 +29,22 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   }
 
   Future<void> _requestPermissionsAndInitialize() async {
-    // Request storage permission
-    final status = await Permission.storage.request();
+    // Request camera permission
+    final status = await Permission.camera.request();
     if (!status.isGranted) {
-      // Try manageExternalStorage for Android 11+
-      final manageStatus = await Permission.manageExternalStorage.request();
-      if (!manageStatus.isGranted) {
-        setState(() {
-          _serverAvailable = false;
-          _isInitializing = false;
-        });
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Storage permission is required to download the AI model'),
-              duration: Duration(seconds: 5),
-            ),
-          );
-        }
-        return;
+      setState(() {
+        _serverAvailable = false;
+        _isInitializing = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Camera permission is required to take photos'),
+            duration: Duration(seconds: 5),
+          ),
+        );
       }
+      return;
     }
 
     // Permission granted, initialize
@@ -96,15 +92,15 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     });
   }
 
-  Future<void> _pickAndDescribeImage() async {
+  Future<void> _takePhotoAndDescribe() async {
     try {
       setState(() {
         _isLoading = true;
         _description = '';
       });
 
-      // Pick image
-      final image = await _imageService.pickImage();
+      // Take photo
+      final image = await _imageService.takePhoto();
       if (image == null) {
         setState(() {
           _isLoading = false;
@@ -221,14 +217,14 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                   ),
                 ),
 
-              // Pick image button
+              // Take photo button
               if (!_isInitializing)
                 ElevatedButton.icon(
                   onPressed: _isLoading || !_serverAvailable
                       ? null
-                      : _pickAndDescribeImage,
-                  icon: const Icon(Icons.photo_library),
-                  label: const Text('Select Image'),
+                      : _takePhotoAndDescribe,
+                  icon: const Icon(Icons.camera_alt),
+                  label: const Text('Take Photo'),
                   style: ElevatedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 16),
                   ),
