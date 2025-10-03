@@ -59,6 +59,9 @@ dependencies:
   # Permission handling
   permission_handler: ^11.3.0
 
+  # Text-to-speech
+  flutter_tts: ^4.2.0
+
   # Explicitly constrain plugin version for SDK 34 compatibility
   flutter_plugin_android_lifecycle: ^2.0.30
 

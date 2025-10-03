@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/llama_service.dart';
+import '../services/tts_service.dart';
 
 class ImagePickerScreen extends StatefulWidget {
   const ImagePickerScreen({super.key});
@@ -13,6 +14,7 @@ class ImagePickerScreen extends StatefulWidget {
 
 class _ImagePickerScreenState extends State<ImagePickerScreen> {
   final LlamaService _llamaService = LlamaService();
+  final TtsService _ttsService = TtsService();
 
   CameraController? _cameraController;
   List<CameraDescription> _cameras = [];
@@ -66,8 +68,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
       await _cameraController!.initialize();
 
-      // Initialize Gemini API
+      // Initialize Gemini API and TTS
       final success = await _llamaService.initialize();
+      await _ttsService.initialize();
 
       if (mounted) {
         setState(() {
@@ -126,6 +129,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       setState(() {
         if (response.success) {
           _description = response.content;
+          // Speak the description immediately
+          _ttsService.speak(_description);
         } else {
           _description = 'Error: ${response.error}';
         }
@@ -143,6 +148,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   void dispose() {
     _cameraController?.dispose();
     _llamaService.dispose();
+    _ttsService.dispose();
     super.dispose();
   }
 
