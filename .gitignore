@@ -41,3 +41,13 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+
+# Security
+.env
+
+# Local configuration (machine-specific paths)
+android/local.properties
+
+# Differing build environment
+android/gradle.properties

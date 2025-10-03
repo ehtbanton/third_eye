@@ -44,11 +44,11 @@ dependencies:
   # Path utilities
   path_provider: ^2.1.2
 
-  # llama.cpp for Flutter - local LLM inference
-  fllama:
-    git:
-      url: https://github.com/Telosnex/fllama.git
-      ref: main
+  # Gemini API for vision
+  google_generative_ai: ^0.4.6
+
+  # Environment variables
+  flutter_dotenv: ^5.2.1
 
   # File downloading
   dio: ^5.4.0
@@ -57,7 +57,7 @@ dependencies:
   permission_handler: ^11.3.0
 
   # Explicitly constrain plugin version for SDK 34 compatibility
-  flutter_plugin_android_lifecycle: 2.0.17
+  flutter_plugin_android_lifecycle: ^2.0.30
 
 dev_dependencies:
   flutter_test:
@@ -80,6 +80,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - .env
 
   # To add assets to your application, add an assets section, like this:
   # assets:
