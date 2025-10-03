@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
-import '../services/image_service.dart';
 import '../services/llama_service.dart';
 
 class ImagePickerScreen extends StatefulWidget {
@@ -12,34 +12,37 @@ class ImagePickerScreen extends StatefulWidget {
 }
 
 class _ImagePickerScreenState extends State<ImagePickerScreen> {
-  final ImageService _imageService = ImageService();
   final LlamaService _llamaService = LlamaService();
 
-  File? _selectedImage;
+  CameraController? _cameraController;
+  List<CameraDescription> _cameras = [];
+  File? _capturedImage;
   String _description = '';
   bool _isLoading = false;
   bool _serverAvailable = false;
   bool _isInitializing = false;
-  double _downloadProgress = 0.0;
 
   @override
   void initState() {
     super.initState();
-    _requestPermissionsAndInitialize();
+    _initializeCamera();
   }
 
-  Future<void> _requestPermissionsAndInitialize() async {
+  Future<void> _initializeCamera() async {
+    setState(() {
+      _isInitializing = true;
+    });
+
     // Request camera permission
     final status = await Permission.camera.request();
     if (!status.isGranted) {
       setState(() {
-        _serverAvailable = false;
         _isInitializing = false;
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Camera permission is required to take photos'),
+            content: Text('Camera permission is required'),
             duration: Duration(seconds: 5),
           ),
         );
@@ -47,37 +50,50 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       return;
     }
 
-    // Permission granted, initialize
-    await _initializeLlm();
-  }
+    // Get available cameras
+    try {
+      _cameras = await availableCameras();
+      if (_cameras.isEmpty) {
+        throw Exception('No cameras found');
+      }
 
-  Future<void> _initializeLlm() async {
-    setState(() {
-      _isInitializing = true;
-      _downloadProgress = 0.0;
-    });
+      // Initialize camera controller with back camera
+      _cameraController = CameraController(
+        _cameras.first,
+        ResolutionPreset.high,
+        enableAudio: false,
+      );
 
-    // Initialize Gemini API (no model download needed!)
-    final success = await _llamaService.initialize();
+      await _cameraController!.initialize();
 
-    if (mounted) {
+      // Initialize Gemini API
+      final success = await _llamaService.initialize();
+
+      if (mounted) {
+        setState(() {
+          _isInitializing = false;
+          _serverAvailable = success;
+        });
+
+        if (!success) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Failed to initialize: Check your API key in .env'),
+              duration: Duration(seconds: 5),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    } catch (e) {
       setState(() {
         _isInitializing = false;
-        _serverAvailable = success;
       });
-
-      if (success) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Gemini API ready!'),
-            duration: Duration(seconds: 2),
-          ),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to initialize: Check your API key in .env'),
-            duration: Duration(seconds: 5),
+          SnackBar(
+            content: Text('Camera initialization failed: $e'),
+            duration: const Duration(seconds: 5),
             backgroundColor: Colors.red,
           ),
         );
@@ -85,35 +101,27 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     }
   }
 
-  Future<void> _checkServerHealth() async {
-    final isHealthy = await _llamaService.checkServerHealth();
-    setState(() {
-      _serverAvailable = isHealthy;
-    });
-  }
+  Future<void> _captureAndDescribe() async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      return;
+    }
 
-  Future<void> _takePhotoAndDescribe() async {
     try {
       setState(() {
         _isLoading = true;
         _description = '';
       });
 
-      // Take photo
-      final image = await _imageService.takePhoto();
-      if (image == null) {
-        setState(() {
-          _isLoading = false;
-        });
-        return;
-      }
+      // Capture image
+      final XFile imageFile = await _cameraController!.takePicture();
+      final File capturedFile = File(imageFile.path);
 
       setState(() {
-        _selectedImage = image;
+        _capturedImage = capturedFile;
       });
 
-      // Get description from LLM using image path
-      final response = await _llamaService.describeImage(image.path);
+      // Get description from LLM
+      final response = await _llamaService.describeImage(capturedFile.path);
 
       setState(() {
         if (response.success) {
@@ -133,6 +141,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
   @override
   void dispose() {
+    _cameraController?.dispose();
     _llamaService.dispose();
     super.dispose();
   }
@@ -140,163 +149,160 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Third Eye'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        actions: [
-          IconButton(
-            icon: Icon(
-              _serverAvailable ? Icons.cloud_done : Icons.cloud_off,
-              color: _serverAvailable ? Colors.green : Colors.red,
-            ),
-            onPressed: _checkServerHealth,
-            tooltip: _serverAvailable ? 'Server connected' : 'Server offline',
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Image preview
-              if (_selectedImage != null)
-                Container(
-                  height: 300,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey),
+      backgroundColor: Colors.black,
+      body: _isInitializing
+          ? const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  CircularProgressIndicator(color: Colors.white),
+                  SizedBox(height: 16),
+                  Text(
+                    'Initializing camera...',
+                    style: TextStyle(color: Colors.white),
                   ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.file(
-                      _selectedImage!,
-                      fit: BoxFit.contain,
-                    ),
-                  ),
-                )
-              else
-                Container(
-                  height: 300,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey),
-                    color: Colors.grey[200],
-                  ),
-                  child: const Center(
-                    child: Icon(
-                      Icons.image,
-                      size: 64,
-                      color: Colors.grey,
-                    ),
-                  ),
-                ),
-
-              const SizedBox(height: 24),
-
-              // API initialization indicator
-              if (_isInitializing)
-                Card(
-                  color: Colors.blue[50],
-                  child: const Padding(
-                    padding: EdgeInsets.all(16.0),
-                    child: Column(
-                      children: [
-                        Text(
-                          'Connecting to Gemini API...',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
+                ],
+              ),
+            )
+          : Column(
+              children: [
+                // Top half: Live camera preview with capture button
+                Expanded(
+                  flex: 1,
+                  child: Stack(
+                    children: [
+                      // Camera preview
+                      if (_cameraController != null &&
+                          _cameraController!.value.isInitialized)
+                        Center(
+                          child: AspectRatio(
+                            aspectRatio: _cameraController!.value.aspectRatio,
+                            child: CameraPreview(_cameraController!),
+                          ),
+                        )
+                      else
+                        const Center(
+                          child: Text(
+                            'Camera not available',
+                            style: TextStyle(color: Colors.white),
                           ),
                         ),
-                        SizedBox(height: 12),
-                        CircularProgressIndicator(),
-                      ],
-                    ),
-                  ),
-                ),
 
-              // Take photo button
-              if (!_isInitializing)
-                ElevatedButton.icon(
-                  onPressed: _isLoading || !_serverAvailable
-                      ? null
-                      : _takePhotoAndDescribe,
-                  icon: const Icon(Icons.camera_alt),
-                  label: const Text('Take Photo'),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                ),
+                      // Status indicator (top right)
+                      Positioned(
+                        top: 40,
+                        right: 16,
+                        child: Icon(
+                          _serverAvailable ? Icons.check_circle : Icons.error,
+                          color: _serverAvailable ? Colors.green : Colors.red,
+                          size: 32,
+                        ),
+                      ),
 
-              const SizedBox(height: 24),
-
-              // Loading indicator or description
-              if (_isLoading)
-                const Center(
-                  child: Column(
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 16),
-                      Text('Analyzing image...'),
+                      // Capture button (bottom center)
+                      Positioned(
+                        bottom: 20,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: FloatingActionButton(
+                            onPressed: _isLoading || !_serverAvailable
+                                ? null
+                                : _captureAndDescribe,
+                            backgroundColor: _serverAvailable
+                                ? Colors.white
+                                : Colors.grey,
+                            child: const Icon(
+                              Icons.camera_alt,
+                              color: Colors.black,
+                              size: 32,
+                            ),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
-                )
-              else if (_description.isNotEmpty)
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Description:',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _description,
-                          style: const TextStyle(fontSize: 16),
-                        ),
-                      ],
-                    ),
-                  ),
                 ),
 
-              const SizedBox(height: 16),
-
-              // API status info
-              if (!_serverAvailable && !_isInitializing)
-                Card(
-                  color: Colors.orange[100],
-                  child: Padding(
-                    padding: const EdgeInsets.all(12.0),
+                // Bottom half: Image preview (left) and description (right)
+                Expanded(
+                  flex: 1,
+                  child: Container(
+                    color: Colors.grey[900],
                     child: Row(
                       children: [
-                        const Icon(Icons.warning, color: Colors.orange),
-                        const SizedBox(width: 8),
-                        const Expanded(
-                          child: Text(
-                            'Gemini API not connected. Check your API key in .env file.',
-                            style: TextStyle(fontSize: 14),
+                        // Left: Image preview
+                        Expanded(
+                          flex: 1,
+                          child: Container(
+                            padding: const EdgeInsets.all(8.0),
+                            child: _capturedImage != null
+                                ? ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Image.file(
+                                      _capturedImage!,
+                                      fit: BoxFit.contain,
+                                    ),
+                                  )
+                                : Center(
+                                    child: Icon(
+                                      Icons.image_outlined,
+                                      size: 64,
+                                      color: Colors.grey[700],
+                                    ),
+                                  ),
                           ),
                         ),
-                        TextButton(
-                          onPressed: _requestPermissionsAndInitialize,
-                          child: const Text('Retry'),
+
+                        // Right: Description
+                        Expanded(
+                          flex: 1,
+                          child: Container(
+                            padding: const EdgeInsets.all(16.0),
+                            child: _isLoading
+                                ? const Center(
+                                    child: Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        CircularProgressIndicator(
+                                            color: Colors.white),
+                                        SizedBox(height: 16),
+                                        Text(
+                                          'Analyzing...',
+                                          style: TextStyle(color: Colors.white),
+                                        ),
+                                      ],
+                                    ),
+                                  )
+                                : _description.isNotEmpty
+                                    ? SingleChildScrollView(
+                                        child: Text(
+                                          _description,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                      )
+                                    : Center(
+                                        child: Text(
+                                          'Tap the button to capture',
+                                          style: TextStyle(
+                                            color: Colors.grey[600],
+                                            fontSize: 14,
+                                          ),
+                                          textAlign: TextAlign.center,
+                                        ),
+                                      ),
+                          ),
                         ),
                       ],
                     ),
                   ),
                 ),
-            ],
-          ),
-        ),
-      ),
+              ],
+            ),
     );
   }
 }

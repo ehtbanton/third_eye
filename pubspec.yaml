@@ -38,6 +38,9 @@ dependencies:
   # Image picking from device storage
   image_picker: ^1.0.7
 
+  # Camera for live preview
+  camera: ^0.11.0+2
+
   # HTTP requests to llama.cpp server
   http: ^1.2.0
 
