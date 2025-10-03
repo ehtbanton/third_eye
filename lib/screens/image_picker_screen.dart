@@ -170,13 +170,14 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                 Expanded(
                   flex: 1,
                   child: Stack(
+                    fit: StackFit.expand,
                     children: [
                       // Camera preview
                       if (_cameraController != null &&
                           _cameraController!.value.isInitialized)
                         Center(
                           child: AspectRatio(
-                            aspectRatio: _cameraController!.value.aspectRatio,
+                            aspectRatio: 1.0 / _cameraController!.value.aspectRatio,
                             child: CameraPreview(_cameraController!),
                           ),
                         )
