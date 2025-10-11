@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:camera/camera.dart';
 import '../services/llama_service.dart';
 import '../services/tts_service.dart';
 import '../services/esp32_bluetooth_service.dart';
@@ -30,6 +31,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   bool _isConnectedToBluetooth = false;
   List<BluetoothDevice> _pairedDevices = [];
 
+  // Phone camera fallback
+  CameraController? _cameraController;
+  bool _usePhoneCamera = false;
+  List<CameraDescription>? _cameras;
+
   @override
   void initState() {
     super.initState();
@@ -42,6 +48,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     });
 
     try {
+      // Request camera permissions
+      await Permission.camera.request();
+
       // Request Bluetooth permissions
       if (Platform.isAndroid) {
         await Permission.bluetooth.request();
@@ -52,6 +61,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       // Initialize Gemini API and TTS
       final success = await _llamaService.initialize();
       await _ttsService.initialize();
+
+      // Get available cameras
+      _cameras = await availableCameras();
 
       // Check if Bluetooth is enabled
       final btEnabled = await _bluetoothService.isBluetoothEnabled();
@@ -78,17 +90,19 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
           );
         }
 
-        // Show dialog to select ESP32 device
+        // Show dialog to select ESP32 device or use phone camera
         if (_pairedDevices.isNotEmpty) {
-          _showDeviceSelectionDialog();
+          _showCameraSourceDialog();
         } else {
+          // No Bluetooth devices, fallback to phone camera
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('No paired Bluetooth devices found. Please pair your ESP32 CAM first.'),
-              duration: Duration(seconds: 5),
-              backgroundColor: Colors.orange,
+              content: Text('No Bluetooth devices found. Using phone camera.'),
+              duration: Duration(seconds: 3),
+              backgroundColor: Colors.blue,
             ),
           );
+          await _initializePhoneCamera();
         }
       }
     } catch (e) {
@@ -100,6 +114,74 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
           SnackBar(
             content: Text('Initialization failed: $e'),
             duration: const Duration(seconds: 5),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _showCameraSourceDialog() async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Select Camera Source'),
+        content: const Text('Choose which camera to use:'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'bluetooth'),
+            child: const Text('ESP32 Bluetooth Camera'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'phone'),
+            child: const Text('Phone Camera'),
+          ),
+        ],
+      ),
+    );
+
+    if (choice == 'bluetooth') {
+      _showDeviceSelectionDialog();
+    } else if (choice == 'phone') {
+      await _initializePhoneCamera();
+    }
+  }
+
+  Future<void> _initializePhoneCamera() async {
+    if (_cameras == null || _cameras!.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No cameras found on device'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    // Find back camera
+    final backCamera = _cameras!.firstWhere(
+      (camera) => camera.lensDirection == CameraLensDirection.back,
+      orElse: () => _cameras!.first,
+    );
+
+    _cameraController = CameraController(
+      backCamera,
+      ResolutionPreset.high,
+      enableAudio: false,
+    );
+
+    try {
+      await _cameraController!.initialize();
+      if (mounted) {
+        setState(() {
+          _usePhoneCamera = true;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to initialize phone camera: $e'),
             backgroundColor: Colors.red,
           ),
         );
@@ -191,11 +273,60 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   }
 
   Future<void> _captureAndDescribe() async {
-    if (!_isConnectedToBluetooth || _currentFrame == null) {
+    File? imageFile;
+
+    // Capture from phone camera
+    if (_usePhoneCamera && _cameraController != null && _cameraController!.value.isInitialized) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final XFile image = await _cameraController!.takePicture();
+        imageFile = File(image.path);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to capture from phone camera: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        setState(() {
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from Bluetooth camera
+    else if (_isConnectedToBluetooth && _currentFrame != null) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+          _snapshotImage = _currentFrame;
+        });
+
+        // Save current frame to a temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(_currentFrame!);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    } else {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Not connected to ESP32 CAM or no image available'),
+            content: Text('No camera available'),
             backgroundColor: Colors.orange,
           ),
         );
@@ -205,23 +336,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
     try {
       setState(() {
-        _isLoading = true;
-        _description = '';
-        _snapshotImage = _currentFrame;
-      });
-
-      // Save current frame to a temporary file
-      final tempDir = await getTemporaryDirectory();
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
-      await tempFile.writeAsBytes(_currentFrame!);
-
-      setState(() {
-        _capturedImage = tempFile;
+        _capturedImage = imageFile;
       });
 
       // Get description from LLM
-      final response = await _llamaService.describeImage(tempFile.path);
+      final response = await _llamaService.describeImage(imageFile.path);
 
       setState(() {
         if (response.success) {
@@ -242,11 +361,60 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   }
 
   Future<void> _captureAndExtractText() async {
-    if (!_isConnectedToBluetooth || _currentFrame == null) {
+    File? imageFile;
+
+    // Capture from phone camera
+    if (_usePhoneCamera && _cameraController != null && _cameraController!.value.isInitialized) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final XFile image = await _cameraController!.takePicture();
+        imageFile = File(image.path);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to capture from phone camera: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        setState(() {
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from Bluetooth camera
+    else if (_isConnectedToBluetooth && _currentFrame != null) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+          _snapshotImage = _currentFrame;
+        });
+
+        // Save current frame to a temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(_currentFrame!);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    } else {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Not connected to ESP32 CAM or no image available'),
+            content: Text('No camera available'),
             backgroundColor: Colors.orange,
           ),
         );
@@ -256,23 +424,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
     try {
       setState(() {
-        _isLoading = true;
-        _description = '';
-        _snapshotImage = _currentFrame;
-      });
-
-      // Save current frame to a temporary file
-      final tempDir = await getTemporaryDirectory();
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
-      await tempFile.writeAsBytes(_currentFrame!);
-
-      setState(() {
-        _capturedImage = tempFile;
+        _capturedImage = imageFile;
       });
 
       // Extract text from LLM
-      final response = await _llamaService.extractText(tempFile.path);
+      final response = await _llamaService.extractText(imageFile.path);
 
       setState(() {
         if (response.success) {
@@ -297,6 +453,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     _bluetoothService.dispose();
     _llamaService.dispose();
     _ttsService.dispose();
+    _cameraController?.dispose();
     super.dispose();
   }
 
@@ -320,14 +477,19 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
             )
           : Column(
               children: [
-                // Top half: ESP32 CAM stream preview with capture button
+                // Top half: Camera preview with capture button
                 Expanded(
                   flex: 1,
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
+                      // Phone camera preview
+                      if (_usePhoneCamera && _cameraController != null && _cameraController!.value.isInitialized)
+                        Center(
+                          child: CameraPreview(_cameraController!),
+                        )
                       // ESP32 CAM stream preview
-                      if (_isConnectedToBluetooth && _currentFrame != null)
+                      else if (_isConnectedToBluetooth && _currentFrame != null)
                         Center(
                           child: Image.memory(
                             _currentFrame!,
@@ -349,25 +511,43 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                             ],
                           ),
                         )
+                      else if (_usePhoneCamera)
+                        const Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              CircularProgressIndicator(color: Colors.white),
+                              SizedBox(height: 16),
+                              Text(
+                                'Initializing phone camera...',
+                                style: TextStyle(color: Colors.white),
+                              ),
+                            ],
+                          ),
+                        )
                       else
                         Center(
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               const Icon(
-                                Icons.bluetooth_disabled,
+                                Icons.camera_alt,
                                 color: Colors.white,
                                 size: 64,
                               ),
                               const SizedBox(height: 16),
                               const Text(
-                                'Not connected to ESP32 CAM',
+                                'No camera connected',
                                 style: TextStyle(color: Colors.white),
                               ),
                               const SizedBox(height: 8),
                               ElevatedButton(
-                                onPressed: () => _showDeviceSelectionDialog(),
-                                child: const Text('Connect to Device'),
+                                onPressed: () => _pairedDevices.isNotEmpty
+                                    ? _showCameraSourceDialog()
+                                    : _initializePhoneCamera(),
+                                child: Text(_pairedDevices.isNotEmpty
+                                    ? 'Select Camera'
+                                    : 'Use Phone Camera'),
                               ),
                             ],
                           ),
@@ -386,8 +566,16 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                             ),
                             const SizedBox(height: 8),
                             Icon(
-                              _isConnectedToBluetooth ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-                              color: _isConnectedToBluetooth ? Colors.blue : Colors.grey,
+                              _isConnectedToBluetooth
+                                  ? Icons.bluetooth_connected
+                                  : _usePhoneCamera
+                                      ? Icons.camera
+                                      : Icons.bluetooth_disabled,
+                              color: _isConnectedToBluetooth
+                                  ? Colors.blue
+                                  : _usePhoneCamera
+                                      ? Colors.green
+                                      : Colors.grey,
                               size: 32,
                             ),
                           ],
@@ -405,10 +593,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                             children: [
                               // Describe button
                               FloatingActionButton(
-                                onPressed: _isLoading || !_serverAvailable || !_isConnectedToBluetooth
+                                onPressed: _isLoading || !_serverAvailable ||
+                                        (!_isConnectedToBluetooth && !_usePhoneCamera)
                                     ? null
                                     : _captureAndDescribe,
-                                backgroundColor: _serverAvailable && _isConnectedToBluetooth
+                                backgroundColor: _serverAvailable &&
+                                        (_isConnectedToBluetooth || _usePhoneCamera)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -420,10 +610,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               const SizedBox(width: 16),
                               // Extract text button
                               FloatingActionButton(
-                                onPressed: _isLoading || !_serverAvailable || !_isConnectedToBluetooth
+                                onPressed: _isLoading || !_serverAvailable ||
+                                        (!_isConnectedToBluetooth && !_usePhoneCamera)
                                     ? null
                                     : _captureAndExtractText,
-                                backgroundColor: _serverAvailable && _isConnectedToBluetooth
+                                backgroundColor: _serverAvailable &&
+                                        (_isConnectedToBluetooth || _usePhoneCamera)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
