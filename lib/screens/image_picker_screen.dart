@@ -144,6 +144,46 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     }
   }
 
+  Future<void> _captureAndExtractText() async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      return;
+    }
+
+    try {
+      setState(() {
+        _isLoading = true;
+        _description = '';
+      });
+
+      // Capture image
+      final XFile imageFile = await _cameraController!.takePicture();
+      final File capturedFile = File(imageFile.path);
+
+      setState(() {
+        _capturedImage = capturedFile;
+      });
+
+      // Extract text from LLM
+      final response = await _llamaService.extractText(capturedFile.path);
+
+      setState(() {
+        if (response.success) {
+          _description = response.content;
+          // Speak the extracted text immediately
+          _ttsService.speak(_description);
+        } else {
+          _description = 'Error: ${response.error}';
+        }
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _description = 'Error: $e';
+        _isLoading = false;
+      });
+    }
+  }
+
   @override
   void dispose() {
     _cameraController?.dispose();
@@ -206,24 +246,45 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                         ),
                       ),
 
-                      // Capture button (bottom center)
+                      // Capture buttons (bottom center)
                       Positioned(
                         bottom: 20,
                         left: 0,
                         right: 0,
                         child: Center(
-                          child: FloatingActionButton(
-                            onPressed: _isLoading || !_serverAvailable
-                                ? null
-                                : _captureAndDescribe,
-                            backgroundColor: _serverAvailable
-                                ? Colors.white
-                                : Colors.grey,
-                            child: const Icon(
-                              Icons.camera_alt,
-                              color: Colors.black,
-                              size: 32,
-                            ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              // Describe button
+                              FloatingActionButton(
+                                onPressed: _isLoading || !_serverAvailable
+                                    ? null
+                                    : _captureAndDescribe,
+                                backgroundColor: _serverAvailable
+                                    ? Colors.white
+                                    : Colors.grey,
+                                child: const Icon(
+                                  Icons.camera_alt,
+                                  color: Colors.black,
+                                  size: 32,
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              // Extract text button
+                              FloatingActionButton(
+                                onPressed: _isLoading || !_serverAvailable
+                                    ? null
+                                    : _captureAndExtractText,
+                                backgroundColor: _serverAvailable
+                                    ? Colors.white
+                                    : Colors.grey,
+                                child: const Icon(
+                                  Icons.text_fields,
+                                  color: Colors.black,
+                                  size: 32,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
