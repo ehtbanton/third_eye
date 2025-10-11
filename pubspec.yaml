@@ -62,6 +62,9 @@ dependencies:
   # Text-to-speech
   flutter_tts: ^4.2.0
 
+  # Bluetooth for ESP32 CAM connection
+  flutter_bluetooth_serial: ^0.4.0
+
   # Explicitly constrain plugin version for SDK 34 compatibility
   flutter_plugin_android_lifecycle: ^2.0.30
 
