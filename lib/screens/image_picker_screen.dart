@@ -241,6 +241,57 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     }
   }
 
+  Future<void> _captureAndExtractText() async {
+    if (!_isConnectedToBluetooth || _currentFrame == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Not connected to ESP32 CAM or no image available'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      setState(() {
+        _isLoading = true;
+        _description = '';
+        _snapshotImage = _currentFrame;
+      });
+
+      // Save current frame to a temporary file
+      final tempDir = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
+      await tempFile.writeAsBytes(_currentFrame!);
+
+      setState(() {
+        _capturedImage = tempFile;
+      });
+
+      // Extract text from LLM
+      final response = await _llamaService.extractText(tempFile.path);
+
+      setState(() {
+        if (response.success) {
+          _description = response.content;
+          // Speak the extracted text immediately
+          _ttsService.speak(_description);
+        } else {
+          _description = 'Error: ${response.error}';
+        }
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _description = 'Error: $e';
+        _isLoading = false;
+      });
+    }
+  }
+
   @override
   void dispose() {
     _bluetoothService.dispose();
@@ -343,24 +394,45 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                         ),
                       ),
 
-                      // Capture button (bottom center)
+                      // Capture buttons (bottom center)
                       Positioned(
                         bottom: 20,
                         left: 0,
                         right: 0,
                         child: Center(
-                          child: FloatingActionButton(
-                            onPressed: _isLoading || !_serverAvailable || !_isConnectedToBluetooth
-                                ? null
-                                : _captureAndDescribe,
-                            backgroundColor: _serverAvailable && _isConnectedToBluetooth
-                                ? Colors.white
-                                : Colors.grey,
-                            child: const Icon(
-                              Icons.camera_alt,
-                              color: Colors.black,
-                              size: 32,
-                            ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              // Describe button
+                              FloatingActionButton(
+                                onPressed: _isLoading || !_serverAvailable || !_isConnectedToBluetooth
+                                    ? null
+                                    : _captureAndDescribe,
+                                backgroundColor: _serverAvailable && _isConnectedToBluetooth
+                                    ? Colors.white
+                                    : Colors.grey,
+                                child: const Icon(
+                                  Icons.camera_alt,
+                                  color: Colors.black,
+                                  size: 32,
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              // Extract text button
+                              FloatingActionButton(
+                                onPressed: _isLoading || !_serverAvailable || !_isConnectedToBluetooth
+                                    ? null
+                                    : _captureAndExtractText,
+                                backgroundColor: _serverAvailable && _isConnectedToBluetooth
+                                    ? Colors.white
+                                    : Colors.grey,
+                                child: const Icon(
+                                  Icons.text_fields,
+                                  color: Colors.black,
+                                  size: 32,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),

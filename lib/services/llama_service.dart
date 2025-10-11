@@ -36,6 +36,25 @@ class LlamaService {
     }
   }
 
+  /// Extract text from image using local LLM
+  Future<LlamaResponse> extractText(String imagePath) async {
+    if (!_isInitialized) {
+      return LlamaResponse.error(
+        'LLM not initialized. Please initialize the service first.',
+      );
+    }
+
+    try {
+      final text = await _localLlm.extractText(imagePath);
+      return LlamaResponse(
+        content: text,
+        success: true,
+      );
+    } catch (e) {
+      return LlamaResponse.error('Failed to extract text: $e');
+    }
+  }
+
   /// Check if the local LLM is ready
   Future<bool> checkServerHealth() async {
     return _isInitialized && _localLlm.isInitialized;

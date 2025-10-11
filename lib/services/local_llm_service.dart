@@ -76,6 +76,50 @@ class LocalLlmService {
     }
   }
 
+  /// Extract text from an image using Gemini
+  Future<String> extractText(String imagePath) async {
+    print('extractText called with: $imagePath');
+
+    if (!_isInitialized || _model == null) {
+      print('ERROR: Model not initialized');
+      throw Exception('Model not initialized. Please initialize first.');
+    }
+
+    try {
+      // Read image file
+      print('Reading image file: $imagePath');
+      final imageFile = File(imagePath);
+      if (!await imageFile.exists()) {
+        throw Exception('Image file not found: $imagePath');
+      }
+
+      final imageBytes = await imageFile.readAsBytes();
+      print('Image size: ${imageBytes.length} bytes');
+
+      // Create image part for Gemini
+      final imagePart = DataPart('image/jpeg', imageBytes);
+
+      // Create prompt
+      final prompt = TextPart('Write out any text that is visible on screen, and nothing else.');
+
+      // Generate content with image
+      print('Sending request to Gemini API...');
+      final response = await _model!.generateContent([
+        Content.multi([prompt, imagePart])
+      ]);
+
+      final text = response.text;
+      print('Gemini response: $text');
+
+      return text?.trim().isNotEmpty == true
+          ? text!.trim()
+          : 'No text detected';
+    } catch (e) {
+      print('ERROR in extractText: $e');
+      throw Exception('Failed to extract text: $e');
+    }
+  }
+
   /// Check if the service is initialized
   bool get isInitialized => _isInitialized;
 
