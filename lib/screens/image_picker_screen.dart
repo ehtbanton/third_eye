@@ -8,6 +8,7 @@ import 'package:camera/camera.dart';
 import '../services/llama_service.dart';
 import '../services/tts_service.dart';
 import '../services/esp32_bluetooth_service.dart';
+import '../services/hardware_key_service.dart';
 
 class ImagePickerScreen extends StatefulWidget {
   const ImagePickerScreen({super.key});
@@ -20,6 +21,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   final LlamaService _llamaService = LlamaService();
   final TtsService _ttsService = TtsService();
   final Esp32BluetoothService _bluetoothService = Esp32BluetoothService();
+  final HardwareKeyService _hardwareKeyService = HardwareKeyService();
 
   Uint8List? _currentFrame;
   Uint8List? _snapshotImage;
@@ -29,6 +31,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   bool _serverAvailable = false;
   bool _isInitializing = false;
   bool _isConnectedToBluetooth = false;
+  bool _hardwareKeysActive = false;
   List<BluetoothDevice> _pairedDevices = [];
 
   // Phone camera fallback
@@ -49,13 +52,31 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
     try {
       // Request camera permissions
-      await Permission.camera.request();
+      final cameraPermission = await Permission.camera.request();
+      print('Camera permission: $cameraPermission');
 
-      // Request Bluetooth permissions
+      // Request Bluetooth permissions for Android 12+ (API 31+)
       if (Platform.isAndroid) {
-        await Permission.bluetooth.request();
-        await Permission.bluetoothConnect.request();
-        await Permission.bluetoothScan.request();
+        final btPermission = await Permission.bluetooth.request();
+        final btConnectPermission = await Permission.bluetoothConnect.request();
+        final btScanPermission = await Permission.bluetoothScan.request();
+
+        print('Bluetooth permission: $btPermission');
+        print('Bluetooth Connect permission: $btConnectPermission');
+        print('Bluetooth Scan permission: $btScanPermission');
+
+        // Check if all required Bluetooth permissions are granted
+        if (!btConnectPermission.isGranted) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Bluetooth Connect permission is required to connect to devices'),
+                duration: Duration(seconds: 5),
+                backgroundColor: Colors.orange,
+              ),
+            );
+          }
+        }
       }
 
       // Initialize Gemini API and TTS
@@ -68,11 +89,24 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       // Check if Bluetooth is enabled
       final btEnabled = await _bluetoothService.isBluetoothEnabled();
       if (!btEnabled) {
-        await _bluetoothService.requestEnableBluetooth();
+        final enabled = await _bluetoothService.requestEnableBluetooth();
+        if (!enabled && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Bluetooth must be enabled to connect to devices'),
+              duration: Duration(seconds: 5),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
       }
 
-      // Get paired devices
+      // Get paired devices - only after permissions are granted
       _pairedDevices = await _bluetoothService.getPairedDevices();
+      print('Found ${_pairedDevices.length} paired Bluetooth devices');
+
+      // Setup hardware key listener for Bluetooth clickers and volume buttons
+      _setupHardwareKeyListener();
 
       if (mounted) {
         setState(() {
@@ -119,6 +153,37 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         );
       }
     }
+  }
+
+  /// Setup listener for hardware key presses (volume buttons from Bluetooth clicker)
+  void _setupHardwareKeyListener() {
+    // Start listening to hardware keys
+    _hardwareKeyService.startListening();
+
+    setState(() {
+      _hardwareKeysActive = _hardwareKeyService.isListening;
+    });
+
+    // Listen to key events
+    _hardwareKeyService.keyStream.listen((event) {
+      print('Hardware key pressed: ${event.keyType}');
+
+      // Trigger capture on any key press if camera is available
+      if (!_isLoading && _serverAvailable && (_isConnectedToBluetooth || _usePhoneCamera)) {
+        // Volume Up: Describe image
+        if (event.keyType == HardwareKeyType.volumeUp) {
+          _captureAndDescribe();
+        }
+        // Volume Down: Extract text
+        else if (event.keyType == HardwareKeyType.volumeDown) {
+          _captureAndExtractText();
+        }
+        // Other buttons: Default to describe
+        else {
+          _captureAndDescribe();
+        }
+      }
+    });
   }
 
   Future<void> _showCameraSourceDialog() async {
@@ -271,6 +336,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       }
     }
   }
+
 
   Future<void> _captureAndDescribe() async {
     File? imageFile;
@@ -451,6 +517,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   @override
   void dispose() {
     _bluetoothService.dispose();
+    _hardwareKeyService.dispose();
     _llamaService.dispose();
     _ttsService.dispose();
     _cameraController?.dispose();
@@ -579,6 +646,39 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               size: 32,
                             ),
                           ],
+                        ),
+                      ),
+
+                      // Hardware key status indicator (top left)
+                      Positioned(
+                        top: 40,
+                        left: 16,
+                        child: Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.5),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Column(
+                            children: [
+                              Icon(
+                                _hardwareKeysActive ? Icons.keyboard : Icons.keyboard_outlined,
+                                color: _hardwareKeysActive ? Colors.green : Colors.grey,
+                                size: 32,
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  _hardwareKeysActive ? 'Clicker\nReady' : 'No Clicker',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
 
