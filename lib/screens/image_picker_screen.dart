@@ -9,6 +9,7 @@ import '../services/llama_service.dart';
 import '../services/tts_service.dart';
 import '../services/esp32_bluetooth_service.dart';
 import '../services/hardware_key_service.dart';
+import '../services/face_recognition_service.dart';
 
 class ImagePickerScreen extends StatefulWidget {
   const ImagePickerScreen({super.key});
@@ -22,6 +23,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   final TtsService _ttsService = TtsService();
   final Esp32BluetoothService _bluetoothService = Esp32BluetoothService();
   final HardwareKeyService _hardwareKeyService = HardwareKeyService();
+  final FaceRecognitionService _faceRecognitionService = FaceRecognitionService();
 
   Uint8List? _currentFrame;
   Uint8List? _snapshotImage;
@@ -178,9 +180,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         else if (event.keyType == HardwareKeyType.volumeDown) {
           _captureAndExtractText();
         }
-        // Other buttons: Default to describe
+        // Other buttons: Face recognition
         else {
-          _captureAndDescribe();
+          _captureAndRecognizeFace();
         }
       }
     });
@@ -514,6 +516,202 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     }
   }
 
+  Future<void> _captureAndRecognizeFace() async {
+    File? imageFile;
+
+    // Capture from phone camera
+    if (_usePhoneCamera && _cameraController != null && _cameraController!.value.isInitialized) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final XFile image = await _cameraController!.takePicture();
+        imageFile = File(image.path);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to capture from phone camera: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        setState(() {
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from Bluetooth camera
+    else if (_isConnectedToBluetooth && _currentFrame != null) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+          _snapshotImage = _currentFrame;
+        });
+
+        // Save current frame to a temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(_currentFrame!);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No camera available'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      setState(() {
+        _capturedImage = imageFile;
+      });
+
+      // Get all known faces from face bank
+      final knownFaceFiles = await _faceRecognitionService.getAllFaceImages();
+      final knownFacePaths = knownFaceFiles.map((f) => f.path).toList();
+      final faceMetadata = await _faceRecognitionService.loadFaceMetadata();
+
+      // Recognize face
+      final response = await _llamaService.recognizeFace(
+        imageFile.path,
+        knownFacePaths,
+        faceMetadata,
+      );
+
+      if (!mounted) return;
+
+      if (response.success) {
+        final result = response.content;
+
+        if (result == 'no_face') {
+          // No clear single face detected
+          setState(() {
+            _description = 'No clear single face detected in the image.';
+            _isLoading = false;
+          });
+          _ttsService.speak(_description);
+        } else if (result == 'unknown') {
+          // New face - ask for name
+          setState(() {
+            _isLoading = false;
+          });
+
+          _showNameInputDialog(imageFile);
+        } else {
+          // Face matched with known person
+          setState(() {
+            _description = 'This is $result';
+            _isLoading = false;
+          });
+          _ttsService.speak(_description);
+        }
+      } else {
+        setState(() {
+          _description = 'Error: ${response.error}';
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _description = 'Error: $e';
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _showNameInputDialog(File imageFile) async {
+    final TextEditingController nameController = TextEditingController();
+
+    // Speak the prompt
+    _ttsService.speak('Person not recognized. Please enter their name.');
+
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Person not recognized'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Please enter their name:'),
+            const SizedBox(height: 16),
+            TextField(
+              controller: nameController,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: 'Enter name',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (value) {
+                Navigator.pop(context, value);
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, nameController.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    if (name != null && name.trim().isNotEmpty) {
+      try {
+        // Save face to bank
+        await _faceRecognitionService.addFace(imageFile, name.trim());
+
+        if (mounted) {
+          setState(() {
+            _description = 'Saved $name to face bank.';
+          });
+          _ttsService.speak(_description);
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('$name added to face bank'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _description = 'Error saving face: $e';
+          });
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Error saving face: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
+  }
+
   @override
   void dispose() {
     _bluetoothService.dispose();
@@ -720,6 +918,23 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                                     : Colors.grey,
                                 child: const Icon(
                                   Icons.text_fields,
+                                  color: Colors.black,
+                                  size: 32,
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              // Face recognition button
+                              FloatingActionButton(
+                                onPressed: _isLoading || !_serverAvailable ||
+                                        (!_isConnectedToBluetooth && !_usePhoneCamera)
+                                    ? null
+                                    : _captureAndRecognizeFace,
+                                backgroundColor: _serverAvailable &&
+                                        (_isConnectedToBluetooth || _usePhoneCamera)
+                                    ? Colors.white
+                                    : Colors.grey,
+                                child: const Icon(
+                                  Icons.face,
                                   color: Colors.black,
                                   size: 32,
                                 ),

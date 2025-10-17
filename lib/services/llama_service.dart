@@ -55,6 +55,25 @@ class LlamaService {
     }
   }
 
+  /// Recognize face in image by comparing with known faces
+  Future<LlamaResponse> recognizeFace(String imagePath, List<String> knownFacePaths, Map<String, String> faceNameMap) async {
+    if (!_isInitialized) {
+      return LlamaResponse.error(
+        'LLM not initialized. Please initialize the service first.',
+      );
+    }
+
+    try {
+      final result = await _localLlm.recognizeFace(imagePath, knownFacePaths, faceNameMap);
+      return LlamaResponse(
+        content: result,
+        success: true,
+      );
+    } catch (e) {
+      return LlamaResponse.error('Failed to recognize face: $e');
+    }
+  }
+
   /// Check if the local LLM is ready
   Future<bool> checkServerHealth() async {
     return _isInitialized && _localLlm.isInitialized;

@@ -32,7 +32,7 @@ class MainActivity: FlutterActivity() {
                     "keyType" to "volumeUp",
                     "keyCode" to keyCode
                 ))
-                return true // Consume the event to prevent volume change
+                return false // Allow system to handle volume change
             }
             KeyEvent.KEYCODE_VOLUME_DOWN -> {
                 Log.d("MainActivity", "✓ Volume DOWN intercepted")
@@ -40,7 +40,7 @@ class MainActivity: FlutterActivity() {
                     "keyType" to "volumeDown",
                     "keyCode" to keyCode
                 ))
-                return true // Consume the event to prevent volume change
+                return false // Allow system to handle volume change
             }
             KeyEvent.KEYCODE_CAMERA -> {
                 Log.d("MainActivity", "✓ Camera button intercepted")
@@ -73,13 +73,16 @@ class MainActivity: FlutterActivity() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-        // Consume volume key up events to prevent default behavior
+        // Allow volume keys to pass through to system
         when (keyCode) {
             KeyEvent.KEYCODE_VOLUME_UP,
-            KeyEvent.KEYCODE_VOLUME_DOWN,
+            KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                Log.d("MainActivity", "Volume key UP passed through (keyCode: $keyCode)")
+                return false
+            }
             KeyEvent.KEYCODE_CAMERA,
             KeyEvent.KEYCODE_FOCUS -> {
-                Log.d("MainActivity", "Volume/Camera key UP consumed (keyCode: $keyCode)")
+                Log.d("MainActivity", "Camera/Focus key UP consumed (keyCode: $keyCode)")
                 return true
             }
         }
