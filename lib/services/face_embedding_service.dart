@@ -52,7 +52,7 @@ class FaceEmbeddingService {
   // For FaceNet: 160x160x3 -> 512-dim embedding
   static const int _inputSize = 112; // MobileFaceNet uses 112x112
   static const int _embeddingSize = 192; // MobileFaceNet outputs 192-dim embeddings
-  static const double _matchThreshold = 0.8; // Cosine similarity threshold
+  static const double _matchThreshold = 0.7; // Cosine similarity threshold
 
   Future<void> initialize() async {
     try {
