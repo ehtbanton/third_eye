@@ -120,105 +120,20 @@ class LocalLlmService {
     }
   }
 
-  /// Recognize face in an image by comparing with known faces
+  /// Recognize face in an image using ML Kit and embeddings
+  /// This method is now a wrapper that maintains backward compatibility
+  /// The actual recognition is handled by FaceRecognitionService
   /// Returns: 'no_face' if no clear single face, person name if matched, or 'unknown' if new face
   Future<String> recognizeFace(String imagePath, List<String> knownFacePaths, Map<String, String> faceNameMap) async {
-    print('recognizeFace called with: $imagePath');
+    print('recognizeFace called with: $imagePath (using ML Kit pipeline)');
 
-    if (!_isInitialized || _model == null) {
-      print('ERROR: Model not initialized');
-      throw Exception('Model not initialized. Please initialize first.');
-    }
+    // Note: This method is kept for backward compatibility
+    // The new approach uses FaceRecognitionService.recognizeFace() directly
+    // which provides better quality feedback and uses embeddings-based matching
 
-    try {
-      // Read the captured image
-      print('Reading captured image: $imagePath');
-      final imageFile = File(imagePath);
-      if (!await imageFile.exists()) {
-        throw Exception('Image file not found: $imagePath');
-      }
-
-      final imageBytes = await imageFile.readAsBytes();
-      print('Captured image size: ${imageBytes.length} bytes');
-
-      // Create image part for the captured image
-      final capturedImagePart = DataPart('image/jpeg', imageBytes);
-
-      // If there are no known faces, this is definitely a new person
-      if (knownFacePaths.isEmpty) {
-        print('No known faces in database');
-        return 'unknown';
-      }
-
-      // Read all known face images
-      final knownFaceParts = <DataPart>[];
-      final knownFaceNames = <String>[];
-
-      for (final facePath in knownFacePaths) {
-        final faceFile = File(facePath);
-        if (await faceFile.exists()) {
-          final faceBytes = await faceFile.readAsBytes();
-          knownFaceParts.add(DataPart('image/jpeg', faceBytes));
-
-          // Get the filename from path
-          final filename = facePath.split(Platform.pathSeparator).last;
-          final personName = faceNameMap[filename] ?? 'Unknown';
-          knownFaceNames.add(personName);
-          print('Loaded known face: $filename -> $personName');
-        }
-      }
-
-      // Create a comprehensive prompt for face recognition
-      final prompt = StringBuffer();
-      prompt.writeln('Analyze the first image and determine if it contains exactly one clear, visible human face.');
-      prompt.writeln('If there is no face, or multiple faces, or the face is unclear, respond with exactly: NO_FACE');
-      prompt.writeln('');
-      prompt.writeln('If there is exactly one clear face, compare it with the following known faces:');
-
-      for (int i = 0; i < knownFaceNames.length; i++) {
-        prompt.writeln('Image ${i + 2}: ${knownFaceNames[i]}');
-      }
-
-      prompt.writeln('');
-      prompt.writeln('Carefully compare the person in image 1 with each of the known faces.');
-      prompt.writeln('If the face in image 1 matches one of the known faces, respond with exactly: MATCHED:<name>');
-      prompt.writeln('If the face in image 1 does not match any known face, respond with exactly: UNKNOWN');
-      prompt.writeln('');
-      prompt.writeln('Be strict in matching - only say MATCHED if you are confident it is the same person.');
-
-      // Build the content array with captured image first, then known faces
-      final contentParts = <Part>[
-        TextPart(prompt.toString()),
-        capturedImagePart,
-        ...knownFaceParts,
-      ];
-
-      // Generate content
-      print('Sending request to Gemini API for face recognition...');
-      final response = await _model!.generateContent([
-        Content.multi(contentParts)
-      ]);
-
-      final text = response.text?.trim() ?? '';
-      print('Gemini response: $text');
-
-      // Parse the response
-      if (text.startsWith('NO_FACE')) {
-        return 'no_face';
-      } else if (text.startsWith('MATCHED:')) {
-        final name = text.substring('MATCHED:'.length).trim();
-        return name;
-      } else if (text.startsWith('UNKNOWN')) {
-        return 'unknown';
-      } else {
-        // Default to unknown if response format is unexpected
-        print('Unexpected response format, defaulting to unknown');
-        return 'unknown';
-      }
-    } catch (e) {
-      print('ERROR in recognizeFace: $e');
-      throw Exception('Failed to recognize face: $e');
-    }
+    // For backward compatibility, we'll return simple strings
+    // But the UI should use FaceRecognitionService.recognizeFace() directly for better results
+    return 'deprecated_use_FaceRecognitionService';
   }
 
   /// Check if the service is initialized

@@ -68,6 +68,15 @@ dependencies:
   # Explicitly constrain plugin version for SDK 34 compatibility
   flutter_plugin_android_lifecycle: ^2.0.30
 
+  # ML Kit for face detection
+  google_mlkit_face_detection: ^0.13.1
+
+  # TensorFlow Lite for face recognition embeddings
+  tflite_flutter: ^0.11.0
+
+  # Image processing for face embeddings
+  image: ^4.0.17
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -92,6 +101,7 @@ flutter:
 
   assets:
     - .env
+    - assets/models/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

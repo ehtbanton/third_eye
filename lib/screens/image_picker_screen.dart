@@ -34,6 +34,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   bool _isInitializing = false;
   bool _isConnectedToBluetooth = false;
   bool _hardwareKeysActive = false;
+  bool _isDialogOpen = false;
   List<BluetoothDevice> _pairedDevices = [];
 
   // Phone camera fallback
@@ -53,6 +54,25 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     });
 
     try {
+      // Initialize face recognition service early
+      print('Initializing face recognition service...');
+      try {
+        await _faceRecognitionService.initialize();
+        print('Face recognition service initialized with ${_faceRecognitionService.cachedFaceCount} known faces');
+      } catch (e) {
+        // Show error but continue - face recognition won't work but other features will
+        print('WARNING: Face recognition initialization failed: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Face recognition unavailable: Missing TFLite model. See assets/models/README.md'),
+              duration: const Duration(seconds: 8),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      }
+
       // Request camera permissions
       final cameraPermission = await Permission.camera.request();
       print('Camera permission: $cameraPermission');
@@ -170,8 +190,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     _hardwareKeyService.keyStream.listen((event) {
       print('Hardware key pressed: ${event.keyType}');
 
-      // Trigger capture on any key press if camera is available
-      if (!_isLoading && _serverAvailable && (_isConnectedToBluetooth || _usePhoneCamera)) {
+      // Trigger capture on any key press if camera is available and no dialog is open
+      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToBluetooth || _usePhoneCamera)) {
         // Volume Up: Describe image
         if (event.keyType == HardwareKeyType.volumeUp) {
           _captureAndDescribe();
@@ -517,6 +537,21 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   }
 
   Future<void> _captureAndRecognizeFace() async {
+    // Check if face recognition is available
+    if (!_faceRecognitionService.isInitialized) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Face recognition unavailable. TFLite model not loaded.'),
+            duration: Duration(seconds: 4),
+            backgroundColor: Colors.red,
+          ),
+        );
+        _ttsService.speak('Face recognition unavailable');
+      }
+      return;
+    }
+
     File? imageFile;
 
     // Capture from phone camera
@@ -583,56 +618,45 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         _capturedImage = imageFile;
       });
 
-      // Get all known faces from face bank
-      final knownFaceFiles = await _faceRecognitionService.getAllFaceImages();
-      final knownFacePaths = knownFaceFiles.map((f) => f.path).toList();
-      final faceMetadata = await _faceRecognitionService.loadFaceMetadata();
-
-      // Recognize face
-      final response = await _llamaService.recognizeFace(
-        imageFile.path,
-        knownFacePaths,
-        faceMetadata,
-      );
+      // Use new ML-based face recognition
+      final result = await _faceRecognitionService.recognizeFace(imageFile);
 
       if (!mounted) return;
 
-      if (response.success) {
-        final result = response.content;
-
-        if (result == 'no_face') {
-          // No clear single face detected
-          setState(() {
-            _description = 'No clear single face detected in the image.';
-            _isLoading = false;
-          });
-          _ttsService.speak(_description);
-        } else if (result == 'unknown') {
-          // New face - ask for name
-          setState(() {
-            _isLoading = false;
-          });
-
-          _showNameInputDialog(imageFile);
-        } else {
-          // Face matched with known person
-          setState(() {
-            _description = 'This is $result';
-            _isLoading = false;
-          });
-          _ttsService.speak(_description);
-        }
-      } else {
+      // Check for quality issues first
+      if (result.qualityIssue != null) {
+        final issue = result.qualityIssue!;
         setState(() {
-          _description = 'Error: ${response.error}';
+          _description = issue.message ?? 'Face quality check failed';
           _isLoading = false;
         });
+        // Speak the issue immediately
+        _ttsService.speak(_description);
+        return;
+      }
+
+      // Check if we found a match
+      if (result.match != null) {
+        final match = result.match!;
+        final confidence = (match.similarity * 100).toStringAsFixed(0);
+        setState(() {
+          _description = 'This is ${match.personName} ($confidence% match)';
+          _isLoading = false;
+        });
+        _ttsService.speak('This is ${match.personName}');
+      } else {
+        // Unknown face - ask for name
+        setState(() {
+          _isLoading = false;
+        });
+        _showNameInputDialog(imageFile);
       }
     } catch (e) {
       setState(() {
         _description = 'Error: $e';
         _isLoading = false;
       });
+      _ttsService.speak('Error during face recognition');
     }
   }
 
@@ -641,6 +665,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
     // Speak the prompt
     _ttsService.speak('Person not recognized. Please enter their name.');
+
+    // Set dialog open flag to prevent hardware key triggers
+    setState(() {
+      _isDialogOpen = true;
+    });
 
     final name = await showDialog<String>(
       context: context,
@@ -677,34 +706,54 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       ),
     );
 
+    // Clear dialog open flag
+    setState(() {
+      _isDialogOpen = false;
+    });
+
     if (name != null && name.trim().isNotEmpty) {
       try {
-        // Save face to bank
+        // Show loading state
+        if (mounted) {
+          setState(() {
+            _isLoading = true;
+            _description = 'Validating and saving face...';
+          });
+        }
+
+        // Save face to bank (includes quality validation and embedding extraction)
         await _faceRecognitionService.addFace(imageFile, name.trim());
 
         if (mounted) {
           setState(() {
-            _description = 'Saved $name to face bank.';
+            _description = 'Saved ${name.trim()} to face bank.';
+            _isLoading = false;
           });
-          _ttsService.speak(_description);
+          _ttsService.speak('Saved ${name.trim()} to face bank');
 
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('$name added to face bank'),
+              content: Text('${name.trim()} added to face bank'),
               backgroundColor: Colors.green,
             ),
           );
         }
       } catch (e) {
+        // Extract the actual error message
+        final errorMessage = e.toString().replaceFirst('Exception: ', '').replaceFirst('Failed to add face: ', '');
+
         if (mounted) {
           setState(() {
-            _description = 'Error saving face: $e';
+            _description = errorMessage;
+            _isLoading = false;
           });
+          _ttsService.speak(errorMessage);
 
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Error saving face: $e'),
+              content: Text(errorMessage),
               backgroundColor: Colors.red,
+              duration: const Duration(seconds: 4),
             ),
           );
         }
@@ -718,6 +767,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     _hardwareKeyService.dispose();
     _llamaService.dispose();
     _ttsService.dispose();
+    _faceRecognitionService.dispose();
     _cameraController?.dispose();
     super.dispose();
   }
