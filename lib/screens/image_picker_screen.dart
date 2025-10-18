@@ -989,6 +989,21 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                                   size: 32,
                                 ),
                               ),
+                              const SizedBox(width: 16),
+                              // Repeat last description button
+                              FloatingActionButton(
+                                onPressed: _description.isEmpty
+                                    ? null
+                                    : () => _ttsService.speak(_description),
+                                backgroundColor: _description.isNotEmpty
+                                    ? Colors.white
+                                    : Colors.grey,
+                                child: const Icon(
+                                  Icons.replay,
+                                  color: Colors.black,
+                                  size: 32,
+                                ),
+                              ),
                             ],
                           ),
                         ),
