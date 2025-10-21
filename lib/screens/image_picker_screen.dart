@@ -234,7 +234,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     }
   }
 
-  Future<void> _initializePhoneCamera() async {
+  Future<void> _initializePhoneCamera({CameraLensDirection? preferredDirection}) async {
     if (_cameras == null || _cameras!.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -245,14 +245,15 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       return;
     }
 
-    // Find back camera
-    final backCamera = _cameras!.firstWhere(
-      (camera) => camera.lensDirection == CameraLensDirection.back,
+    // Find camera based on preferred direction, default to back
+    final targetDirection = preferredDirection ?? CameraLensDirection.back;
+    final selectedCamera = _cameras!.firstWhere(
+      (camera) => camera.lensDirection == targetDirection,
       orElse: () => _cameras!.first,
     );
 
     _cameraController = CameraController(
-      backCamera,
+      selectedCamera,
       ResolutionPreset.high,
       enableAudio: false,
     );
@@ -274,6 +275,20 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         );
       }
     }
+  }
+
+  Future<void> _switchCamera() async {
+    if (_cameraController == null || _cameras == null || _cameras!.length < 2) {
+      return;
+    }
+
+    final currentDirection = _cameraController!.description.lensDirection;
+    final newDirection = currentDirection == CameraLensDirection.back
+        ? CameraLensDirection.front
+        : CameraLensDirection.back;
+
+    await _cameraController!.dispose();
+    await _initializePhoneCamera(preferredDirection: newDirection);
   }
 
   Future<void> _showDeviceSelectionDialog() async {
@@ -800,8 +815,20 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                     children: [
                       // Phone camera preview
                       if (_usePhoneCamera && _cameraController != null && _cameraController!.value.isInitialized)
-                        Center(
-                          child: CameraPreview(_cameraController!),
+                        GestureDetector(
+                          onVerticalDragEnd: (details) {
+                            // Detect swipe up or down
+                            if (details.primaryVelocity != null &&
+                                details.primaryVelocity!.abs() > 300 &&
+                                !_isLoading &&
+                                _cameras != null &&
+                                _cameras!.length > 1) {
+                              _switchCamera();
+                            }
+                          },
+                          child: Center(
+                            child: CameraPreview(_cameraController!),
+                          ),
                         )
                       // ESP32 CAM stream preview
                       else if (_isConnectedToBluetooth && _currentFrame != null)
