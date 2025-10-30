@@ -1,13 +1,12 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:camera/camera.dart';
 import '../services/llama_service.dart';
 import '../services/tts_service.dart';
-import '../services/esp32_bluetooth_service.dart';
+import '../services/esp32_wifi_service.dart';
 import '../services/hardware_key_service.dart';
 import '../services/face_recognition_service.dart';
 
@@ -21,7 +20,7 @@ class ImagePickerScreen extends StatefulWidget {
 class _ImagePickerScreenState extends State<ImagePickerScreen> {
   final LlamaService _llamaService = LlamaService();
   final TtsService _ttsService = TtsService();
-  final Esp32BluetoothService _bluetoothService = Esp32BluetoothService();
+  final Esp32WifiService _wifiService = Esp32WifiService();
   final HardwareKeyService _hardwareKeyService = HardwareKeyService();
   final FaceRecognitionService _faceRecognitionService = FaceRecognitionService();
 
@@ -32,10 +31,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   bool _isLoading = false;
   bool _serverAvailable = false;
   bool _isInitializing = false;
-  bool _isConnectedToBluetooth = false;
+  bool _isConnectedToWifi = false;
   bool _hardwareKeysActive = false;
   bool _isDialogOpen = false;
-  List<BluetoothDevice> _pairedDevices = [];
 
   // Phone camera fallback
   CameraController? _cameraController;
@@ -74,48 +72,16 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       }
 
       // Request camera permissions
+      print('Requesting camera permission...');
       final cameraPermission = await Permission.camera.request();
-      print('Camera permission: $cameraPermission');
+      print('Camera permission status: $cameraPermission');
 
-      // Request Bluetooth permissions for Android 12+ (API 31+)
-      if (Platform.isAndroid) {
-        final btPermission = await Permission.bluetooth.request();
-        final btConnectPermission = await Permission.bluetoothConnect.request();
-        final btScanPermission = await Permission.bluetoothScan.request();
-
-        print('Bluetooth permission: $btPermission');
-        print('Bluetooth Connect permission: $btConnectPermission');
-        print('Bluetooth Scan permission: $btScanPermission');
-
-        // Check if all required Bluetooth permissions are granted
-        if (!btConnectPermission.isGranted) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Bluetooth Connect permission is required to connect to devices'),
-                duration: Duration(seconds: 5),
-                backgroundColor: Colors.orange,
-              ),
-            );
-          }
-        }
-      }
-
-      // Initialize Gemini API and TTS
-      final success = await _llamaService.initialize();
-      await _ttsService.initialize();
-
-      // Get available cameras
-      _cameras = await availableCameras();
-
-      // Check if Bluetooth is enabled
-      final btEnabled = await _bluetoothService.isBluetoothEnabled();
-      if (!btEnabled) {
-        final enabled = await _bluetoothService.requestEnableBluetooth();
-        if (!enabled && mounted) {
+      if (!cameraPermission.isGranted) {
+        print('WARNING: Camera permission not granted');
+        if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Bluetooth must be enabled to connect to devices'),
+              content: Text('Camera permission is required to use the camera'),
               duration: Duration(seconds: 5),
               backgroundColor: Colors.orange,
             ),
@@ -123,9 +89,28 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         }
       }
 
-      // Get paired devices - only after permissions are granted
-      _pairedDevices = await _bluetoothService.getPairedDevices();
-      print('Found ${_pairedDevices.length} paired Bluetooth devices');
+      // No Bluetooth permissions needed for WiFi connection
+
+      // Initialize Gemini API and TTS
+      final success = await _llamaService.initialize();
+      await _ttsService.initialize();
+
+      // Get available cameras
+      print('Querying available cameras...');
+      try {
+        _cameras = await availableCameras();
+        print('Found ${_cameras?.length ?? 0} cameras:');
+        if (_cameras != null) {
+          for (var i = 0; i < _cameras!.length; i++) {
+            print('  Camera $i: ${_cameras![i].name} (${_cameras![i].lensDirection})');
+          }
+        }
+      } catch (e) {
+        print('ERROR: Failed to get available cameras: $e');
+        _cameras = null;
+      }
+
+      // WiFi doesn't require manual enabling like Bluetooth
 
       // Setup hardware key listener for Bluetooth clickers and volume buttons
       _setupHardwareKeyListener();
@@ -139,27 +124,16 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         if (!success) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Failed to initialize: Check your API key in .env'),
-              duration: Duration(seconds: 5),
+              content: Text('Failed to initialize Gemini API. Make sure:\n1. Your API key is set in .env\n2. Mobile data is enabled\n3. You have cellular signal'),
+              duration: Duration(seconds: 8),
               backgroundColor: Colors.red,
             ),
           );
+          _ttsService.speak('Failed to initialize. Please enable mobile data.');
         }
 
-        // Show dialog to select ESP32 device or use phone camera
-        if (_pairedDevices.isNotEmpty) {
-          _showCameraSourceDialog();
-        } else {
-          // No Bluetooth devices, fallback to phone camera
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('No Bluetooth devices found. Using phone camera.'),
-              duration: Duration(seconds: 3),
-              backgroundColor: Colors.blue,
-            ),
-          );
-          await _initializePhoneCamera();
-        }
+        // Show dialog to select camera source
+        _showCameraSourceDialog();
       }
     } catch (e) {
       setState(() {
@@ -186,24 +160,34 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       _hardwareKeysActive = _hardwareKeyService.isListening;
     });
 
-    // Listen to key events
+    // Listen to key events from AB Shutter 3 Bluetooth clicker
     _hardwareKeyService.keyStream.listen((event) {
-      print('Hardware key pressed: ${event.keyType}');
+      print('=== AB Shutter 3 Button Press Detected ===');
+      print('Button type: ${event.keyType}');
+      print('Camera available: ${_isConnectedToWifi || _usePhoneCamera}');
+      print('Server available: $_serverAvailable');
+      print('Is loading: $_isLoading');
+      print('Dialog open: $_isDialogOpen');
 
       // Trigger capture on any key press if camera is available and no dialog is open
-      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToBluetooth || _usePhoneCamera)) {
-        // Volume Up: Describe image
+      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _usePhoneCamera)) {
+        // Button 1 (Volume Up): Take photo and describe image
         if (event.keyType == HardwareKeyType.volumeUp) {
+          print('✓ Button 1 pressed - Taking photo and describing image');
           _captureAndDescribe();
         }
-        // Volume Down: Extract text
+        // Button 2 (Volume Down): Take photo and extract text (test reading)
         else if (event.keyType == HardwareKeyType.volumeDown) {
+          print('✓ Button 2 pressed - Taking photo and extracting text');
           _captureAndExtractText();
         }
-        // Other buttons: Face recognition
+        // Other buttons (if any): Face recognition
         else {
+          print('✓ Other button pressed - Performing face recognition');
           _captureAndRecognizeFace();
         }
+      } else {
+        print('⚠ Button press ignored - conditions not met for capture');
       }
     });
   }
@@ -216,8 +200,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         content: const Text('Choose which camera to use:'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, 'bluetooth'),
-            child: const Text('ESP32 Bluetooth Camera'),
+            onPressed: () => Navigator.pop(context, 'wifi'),
+            child: const Text('ESP32-CAM WiFi (192.168.4.1)'),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, 'phone'),
@@ -227,99 +211,138 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       ),
     );
 
-    if (choice == 'bluetooth') {
-      _showDeviceSelectionDialog();
+    if (choice == 'wifi') {
+      await _connectToEsp32Wifi();
     } else if (choice == 'phone') {
       await _initializePhoneCamera();
     }
   }
 
   Future<void> _initializePhoneCamera() async {
+    print('=== Phone Camera Initialization Started ===');
+    print('Available cameras: ${_cameras?.length ?? 0}');
+
     if (_cameras == null || _cameras!.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No cameras found on device'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
+      final errorMsg = 'No cameras found on device. Camera permission may be denied.';
+      print('ERROR: $errorMsg');
 
-    // Find back camera
-    final backCamera = _cameras!.firstWhere(
-      (camera) => camera.lensDirection == CameraLensDirection.back,
-      orElse: () => _cameras!.first,
-    );
-
-    _cameraController = CameraController(
-      backCamera,
-      ResolutionPreset.high,
-      enableAudio: false,
-    );
-
-    try {
-      await _cameraController!.initialize();
-      if (mounted) {
-        setState(() {
-          _usePhoneCamera = true;
-        });
-      }
-    } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Failed to initialize phone camera: $e'),
+            content: Text(errorMsg),
             backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
           ),
         );
+        _ttsService.speak('Camera not available. Please check permissions.');
+      }
+      return;
+    }
+
+    // Show loading state
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+      });
+    }
+
+    try {
+      // Find back camera
+      final backCamera = _cameras!.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.back,
+        orElse: () => _cameras!.first,
+      );
+
+      print('Initializing phone camera: ${backCamera.name}');
+      print('Camera direction: ${backCamera.lensDirection}');
+
+      _cameraController = CameraController(
+        backCamera,
+        ResolutionPreset.high,
+        enableAudio: false,
+      );
+
+      print('Starting camera controller initialization...');
+      await _cameraController!.initialize();
+
+      print('✓ Phone camera initialized successfully');
+
+      if (mounted) {
+        setState(() {
+          _usePhoneCamera = true;
+          _isLoading = false;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Phone camera ready'),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
+          ),
+        );
+
+        _ttsService.speak('Camera ready');
+      }
+    } catch (e, stackTrace) {
+      print('✗ Failed to initialize phone camera');
+      print('Error: $e');
+      print('Stack trace: $stackTrace');
+
+      // Provide more specific error messages
+      String userMessage = 'Failed to initialize phone camera';
+      String spokenMessage = 'Camera initialization failed';
+
+      if (e.toString().contains('permission')) {
+        userMessage = 'Camera permission denied. Please grant camera access in settings.';
+        spokenMessage = 'Camera permission denied';
+      } else if (e.toString().contains('in use')) {
+        userMessage = 'Camera is being used by another app. Please close other camera apps.';
+        spokenMessage = 'Camera is in use by another app';
+      } else if (e.toString().contains('not available')) {
+        userMessage = 'Camera not available. It may be disconnected or disabled.';
+        spokenMessage = 'Camera not available';
+      } else {
+        userMessage = 'Failed to initialize camera: $e';
+      }
+
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _usePhoneCamera = false;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(userMessage),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 7),
+          ),
+        );
+
+        _ttsService.speak(spokenMessage);
       }
     }
   }
 
-  Future<void> _showDeviceSelectionDialog() async {
-    final device = await showDialog<BluetoothDevice>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Select ESP32 CAM'),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: ListView.builder(
-            shrinkWrap: true,
-            itemCount: _pairedDevices.length,
-            itemBuilder: (context, index) {
-              final device = _pairedDevices[index];
-              return ListTile(
-                title: Text(device.name ?? 'Unknown Device'),
-                subtitle: Text(device.address),
-                onTap: () => Navigator.pop(context, device),
-              );
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-        ],
-      ),
-    );
-
-    if (device != null) {
-      await _connectToDevice(device);
-    }
-  }
-
-  Future<void> _connectToDevice(BluetoothDevice device) async {
+  Future<void> _connectToEsp32Wifi() async {
     setState(() {
       _isLoading = true;
     });
 
-    final success = await _bluetoothService.connect(device.address);
+    // Inform user to connect to ESP32-CAM WiFi network first
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Connecting to ESP32-CAM at 192.168.4.1...'),
+        duration: Duration(seconds: 2),
+        backgroundColor: Colors.blue,
+      ),
+    );
+
+    final success = await _wifiService.connect(esp32Ip: '192.168.4.1');
 
     if (success) {
       // Listen to image stream
-      _bluetoothService.imageStream.listen((imageData) {
+      _wifiService.imageStream.listen((imageData) {
         if (mounted) {
           setState(() {
             _currentFrame = imageData;
@@ -327,21 +350,35 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         }
       });
 
-      // Start streaming
-      await _bluetoothService.startStreaming();
+      // Listen to connection state changes
+      _wifiService.connectionStateStream.listen((connected) {
+        if (mounted && !connected && _isConnectedToWifi) {
+          setState(() {
+            _isConnectedToWifi = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('ESP32-CAM disconnected'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      });
 
       if (mounted) {
         setState(() {
-          _isConnectedToBluetooth = true;
+          _isConnectedToWifi = true;
           _isLoading = false;
         });
 
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Connected to ${device.name}'),
+          const SnackBar(
+            content: Text('Connected to ESP32-CAM WiFi'),
             backgroundColor: Colors.green,
           ),
         );
+
+        _ttsService.speak('ESP32 camera connected');
       }
     } else {
       if (mounted) {
@@ -351,10 +388,13 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Failed to connect to ESP32 CAM'),
+            content: Text('Failed to connect to ESP32-CAM. Make sure you are connected to ESP32-CAM-AP WiFi network.'),
             backgroundColor: Colors.red,
+            duration: Duration(seconds: 5),
           ),
         );
+
+        _ttsService.speak('Failed to connect to ESP32 camera');
       }
     }
   }
@@ -388,8 +428,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         return;
       }
     }
-    // Capture from Bluetooth camera
-    else if (_isConnectedToBluetooth && _currentFrame != null) {
+    // Capture from WiFi camera
+    else if (_isConnectedToWifi && _currentFrame != null) {
       try {
         setState(() {
           _isLoading = true;
@@ -476,8 +516,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         return;
       }
     }
-    // Capture from Bluetooth camera
-    else if (_isConnectedToBluetooth && _currentFrame != null) {
+    // Capture from WiFi camera
+    else if (_isConnectedToWifi && _currentFrame != null) {
       try {
         setState(() {
           _isLoading = true;
@@ -579,8 +619,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         return;
       }
     }
-    // Capture from Bluetooth camera
-    else if (_isConnectedToBluetooth && _currentFrame != null) {
+    // Capture from WiFi camera
+    else if (_isConnectedToWifi && _currentFrame != null) {
       try {
         setState(() {
           _isLoading = true;
@@ -763,7 +803,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
   @override
   void dispose() {
-    _bluetoothService.dispose();
+    _wifiService.dispose();
     _hardwareKeyService.dispose();
     _llamaService.dispose();
     _ttsService.dispose();
@@ -803,8 +843,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                         Center(
                           child: CameraPreview(_cameraController!),
                         )
-                      // ESP32 CAM stream preview
-                      else if (_isConnectedToBluetooth && _currentFrame != null)
+                      // ESP32-CAM WiFi stream preview
+                      else if (_isConnectedToWifi && _currentFrame != null)
                         Center(
                           child: Image.memory(
                             _currentFrame!,
@@ -812,7 +852,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                             gaplessPlayback: true,
                           ),
                         )
-                      else if (_isConnectedToBluetooth)
+                      else if (_isConnectedToWifi)
                         const Center(
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
@@ -820,7 +860,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               CircularProgressIndicator(color: Colors.white),
                               SizedBox(height: 16),
                               Text(
-                                'Waiting for ESP32 CAM stream...',
+                                'Waiting for ESP32-CAM WiFi stream...',
                                 style: TextStyle(color: Colors.white),
                               ),
                             ],
@@ -857,12 +897,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               ),
                               const SizedBox(height: 8),
                               ElevatedButton(
-                                onPressed: () => _pairedDevices.isNotEmpty
-                                    ? _showCameraSourceDialog()
-                                    : _initializePhoneCamera(),
-                                child: Text(_pairedDevices.isNotEmpty
-                                    ? 'Select Camera'
-                                    : 'Use Phone Camera'),
+                                onPressed: _showCameraSourceDialog,
+                                child: const Text('Select Camera'),
                               ),
                             ],
                           ),
@@ -881,12 +917,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                             ),
                             const SizedBox(height: 8),
                             Icon(
-                              _isConnectedToBluetooth
-                                  ? Icons.bluetooth_connected
+                              _isConnectedToWifi
+                                  ? Icons.wifi
                                   : _usePhoneCamera
                                       ? Icons.camera
-                                      : Icons.bluetooth_disabled,
-                              color: _isConnectedToBluetooth
+                                      : Icons.wifi_off,
+                              color: _isConnectedToWifi
                                   ? Colors.blue
                                   : _usePhoneCamera
                                       ? Colors.green
@@ -942,11 +978,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Describe button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToBluetooth && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_usePhoneCamera)
                                     ? null
                                     : _captureAndDescribe,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToBluetooth || _usePhoneCamera)
+                                        (_isConnectedToWifi || _usePhoneCamera)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -959,11 +995,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Extract text button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToBluetooth && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_usePhoneCamera)
                                     ? null
                                     : _captureAndExtractText,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToBluetooth || _usePhoneCamera)
+                                        (_isConnectedToWifi || _usePhoneCamera)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -976,11 +1012,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Face recognition button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToBluetooth && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_usePhoneCamera)
                                     ? null
                                     : _captureAndRecognizeFace,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToBluetooth || _usePhoneCamera)
+                                        (_isConnectedToWifi || _usePhoneCamera)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(

@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter doctor:*)",
+      "Bash(flutter:*)",
+      "Bash(adb install:*)",
+      "Bash(rm:*)",
+      "Bash(git pull:*)",
+      "Bash(adb logcat -d)",
+      "Bash(./gradlew assembleDebug)",
+      "Read(//c/Users/nidee/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

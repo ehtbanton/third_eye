@@ -62,8 +62,11 @@ dependencies:
   # Text-to-speech
   flutter_tts: ^4.2.0
 
-  # Bluetooth for ESP32 CAM connection
+  # Bluetooth for AB Shutter clicker (hardware keys)
   flutter_bluetooth_serial: ^0.4.0
+
+  # WebSocket for ESP32-CAM WiFi connection
+  web_socket_channel: ^3.0.1
 
   # Explicitly constrain plugin version for SDK 34 compatibility
   flutter_plugin_android_lifecycle: ^2.0.30

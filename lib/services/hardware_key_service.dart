@@ -47,7 +47,13 @@ class HardwareKeyService {
     }
 
     if (keyType != null && !_keyStreamController.isClosed) {
+      print('Hardware key detected: $keyType');
       _keyStreamController.add(HardwareKeyEvent(keyType));
+
+      // Return true for volume keys to prevent system from changing actual volume
+      if (keyType == HardwareKeyType.volumeUp || keyType == HardwareKeyType.volumeDown) {
+        return true;
+      }
     }
 
     // Return false to allow the system to also handle the key

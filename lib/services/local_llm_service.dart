@@ -1,119 +1,57 @@
 import 'dart:async';
-import 'dart:io';
-import 'package:google_generative_ai/google_generative_ai.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'cellular_gemini_service.dart';
 
 class LocalLlmService {
-  GenerativeModel? _model;
+  final CellularGeminiService _cellularGemini = CellularGeminiService();
   bool _isInitialized = false;
 
-  /// Initialize the Gemini API service
+  /// Initialize the Gemini API service (now using cellular network)
   Future<bool> initialize(String modelPath, String mmprojPath) async {
     try {
-      // Load API key from environment
-      final apiKey = dotenv.env['GEMINI_API_KEY'];
-      if (apiKey == null || apiKey.isEmpty || apiKey == 'your_api_key_here') {
-        print('ERROR: GEMINI_API_KEY not set in .env file');
-        return false;
+      print('Initializing Gemini API with cellular routing...');
+      _isInitialized = await _cellularGemini.initialize();
+
+      if (_isInitialized) {
+        print('✓ Gemini API initialized successfully (cellular routing enabled)');
+      } else {
+        print('✗ Failed to initialize Gemini API with cellular routing');
       }
 
-      // Initialize Gemini model (2.5 Flash with vision support)
-      _model = GenerativeModel(
-        model: 'gemini-2.0-flash-exp',
-        apiKey: apiKey,
-      );
-
-      _isInitialized = true;
-      print('Gemini API initialized successfully');
-      return true;
+      return _isInitialized;
     } catch (e) {
       print('Failed to initialize Gemini API: $e');
       return false;
     }
   }
 
-  /// Generate a description for an image using Gemini
+  /// Generate a description for an image using Gemini (via cellular network)
   Future<String> describeImage(String imagePath) async {
     print('describeImage called with: $imagePath');
 
-    if (!_isInitialized || _model == null) {
-      print('ERROR: Model not initialized');
-      throw Exception('Model not initialized. Please initialize first.');
+    if (!_isInitialized) {
+      print('ERROR: Service not initialized');
+      throw Exception('Service not initialized. Please initialize first.');
     }
 
     try {
-      // Read image file
-      print('Reading image file: $imagePath');
-      final imageFile = File(imagePath);
-      if (!await imageFile.exists()) {
-        throw Exception('Image file not found: $imagePath');
-      }
-
-      final imageBytes = await imageFile.readAsBytes();
-      print('Image size: ${imageBytes.length} bytes');
-
-      // Create image part for Gemini
-      final imagePart = DataPart('image/jpeg', imageBytes);
-
-      // Create prompt
-      final prompt = TextPart('Describe this image in one sentence.');
-
-      // Generate content with image
-      print('Sending request to Gemini API...');
-      final response = await _model!.generateContent([
-        Content.multi([prompt, imagePart])
-      ]);
-
-      final text = response.text;
-      print('Gemini response: $text');
-
-      return text?.trim().isNotEmpty == true
-          ? text!.trim()
-          : 'No description generated';
+      return await _cellularGemini.describeImage(imagePath);
     } catch (e) {
       print('ERROR in describeImage: $e');
       throw Exception('Failed to generate description: $e');
     }
   }
 
-  /// Extract text from an image using Gemini
+  /// Extract text from an image using Gemini (via cellular network)
   Future<String> extractText(String imagePath) async {
     print('extractText called with: $imagePath');
 
-    if (!_isInitialized || _model == null) {
-      print('ERROR: Model not initialized');
-      throw Exception('Model not initialized. Please initialize first.');
+    if (!_isInitialized) {
+      print('ERROR: Service not initialized');
+      throw Exception('Service not initialized. Please initialize first.');
     }
 
     try {
-      // Read image file
-      print('Reading image file: $imagePath');
-      final imageFile = File(imagePath);
-      if (!await imageFile.exists()) {
-        throw Exception('Image file not found: $imagePath');
-      }
-
-      final imageBytes = await imageFile.readAsBytes();
-      print('Image size: ${imageBytes.length} bytes');
-
-      // Create image part for Gemini
-      final imagePart = DataPart('image/jpeg', imageBytes);
-
-      // Create prompt
-      final prompt = TextPart('Write out any text that is visible on screen, and nothing else.');
-
-      // Generate content with image
-      print('Sending request to Gemini API...');
-      final response = await _model!.generateContent([
-        Content.multi([prompt, imagePart])
-      ]);
-
-      final text = response.text;
-      print('Gemini response: $text');
-
-      return text?.trim().isNotEmpty == true
-          ? text!.trim()
-          : 'No text detected';
+      return await _cellularGemini.extractText(imagePath);
     } catch (e) {
       print('ERROR in extractText: $e');
       throw Exception('Failed to extract text: $e');
@@ -139,9 +77,14 @@ class LocalLlmService {
   /// Check if the service is initialized
   bool get isInitialized => _isInitialized;
 
+  /// Check if cellular network is available for Gemini requests
+  Future<bool> isCellularAvailable() async {
+    return await _cellularGemini.isCellularAvailable();
+  }
+
   /// Dispose of resources
   Future<void> dispose() async {
-    _model = null;
+    await _cellularGemini.dispose();
     _isInitialized = false;
     print('Gemini service disposed');
   }
