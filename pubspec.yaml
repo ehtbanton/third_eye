@@ -80,6 +80,9 @@ dependencies:
   # Image processing for face embeddings
   image: ^4.0.17
 
+  # VLC player for UDP H264 streams (SLP2/StereoPi)
+  flutter_vlc_player: ^7.4.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

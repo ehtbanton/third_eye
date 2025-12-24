@@ -4,9 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:camera/camera.dart';
+import 'package:flutter_vlc_player/flutter_vlc_player.dart';
 import '../services/llama_service.dart';
 import '../services/tts_service.dart';
 import '../services/esp32_wifi_service.dart';
+import '../services/slp2_stream_service.dart';
 import '../services/hardware_key_service.dart';
 import '../services/face_recognition_service.dart';
 
@@ -21,6 +23,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   final LlamaService _llamaService = LlamaService();
   final TtsService _ttsService = TtsService();
   final Esp32WifiService _wifiService = Esp32WifiService();
+  final Slp2StreamService _slp2Service = Slp2StreamService();
   final HardwareKeyService _hardwareKeyService = HardwareKeyService();
   final FaceRecognitionService _faceRecognitionService = FaceRecognitionService();
 
@@ -32,6 +35,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   bool _serverAvailable = false;
   bool _isInitializing = false;
   bool _isConnectedToWifi = false;
+  bool _isConnectedToSlp2 = false;
   bool _hardwareKeysActive = false;
   bool _isDialogOpen = false;
 
@@ -164,13 +168,13 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     _hardwareKeyService.keyStream.listen((event) {
       print('=== AB Shutter 3 Button Press Detected ===');
       print('Button type: ${event.keyType}');
-      print('Camera available: ${_isConnectedToWifi || _usePhoneCamera}');
+      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera}');
       print('Server available: $_serverAvailable');
       print('Is loading: $_isLoading');
       print('Dialog open: $_isDialogOpen');
 
       // Trigger capture on any key press if camera is available and no dialog is open
-      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _usePhoneCamera)) {
+      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera)) {
         // Button 1 (Volume Up): Take photo and describe image
         if (event.keyType == HardwareKeyType.volumeUp) {
           print('✓ Button 1 pressed - Taking photo and describing image');
@@ -204,6 +208,10 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
             child: const Text('ESP32-CAM WiFi (192.168.4.1)'),
           ),
           TextButton(
+            onPressed: () => Navigator.pop(context, 'slp2'),
+            child: const Text('StereoPi SLP2 (UDP H264)'),
+          ),
+          TextButton(
             onPressed: () => Navigator.pop(context, 'phone'),
             child: const Text('Phone Camera'),
           ),
@@ -213,8 +221,85 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
     if (choice == 'wifi') {
       await _connectToEsp32Wifi();
+    } else if (choice == 'slp2') {
+      await _connectToSlp2();
     } else if (choice == 'phone') {
       await _initializePhoneCamera();
+    }
+  }
+
+  Future<void> _connectToSlp2() async {
+    setState(() {
+      _isLoading = true;
+    });
+
+    // Show connection instructions
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Connect to WiFi: ${Slp2StreamService.defaultSsid}\n'
+            'Password: ${Slp2StreamService.defaultPassword}\n'
+            'Configure SLP2 to stream to your phone IP on port ${Slp2StreamService.streamPort}',
+          ),
+          duration: const Duration(seconds: 8),
+          backgroundColor: Colors.blue,
+        ),
+      );
+    }
+
+    final success = await _slp2Service.connect();
+
+    if (success) {
+      // Listen to connection state changes
+      _slp2Service.connectionStateStream.listen((connected) {
+        if (mounted && !connected && _isConnectedToSlp2) {
+          setState(() {
+            _isConnectedToSlp2 = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('SLP2 stream disconnected'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      });
+
+      if (mounted) {
+        setState(() {
+          _isConnectedToSlp2 = true;
+          _isLoading = false;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Connected to SLP2 UDP stream'),
+            backgroundColor: Colors.green,
+          ),
+        );
+
+        _ttsService.speak('SLP2 camera connected');
+      }
+    } else {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Failed to connect to SLP2.\n\n'
+              '${Slp2StreamService.getConnectionInstructions()}',
+            ),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
+          ),
+        );
+
+        _ttsService.speak('Failed to connect to SLP2 camera');
+      }
     }
   }
 
@@ -428,7 +513,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         return;
       }
     }
-    // Capture from WiFi camera
+    // Capture from WiFi camera (ESP32)
     else if (_isConnectedToWifi && _currentFrame != null) {
       try {
         setState(() {
@@ -442,6 +527,36 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
         await tempFile.writeAsBytes(_currentFrame!);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from SLP2 (UDP H264)
+    else if (_isConnectedToSlp2) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        // Capture frame from VLC player
+        final frameBytes = await _slp2Service.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from SLP2');
+        }
+
+        _snapshotImage = frameBytes;
+
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
         setState(() {
@@ -468,7 +583,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       });
 
       // Get description from LLM
-      final response = await _llamaService.describeImage(imageFile.path);
+      final response = await _llamaService.describeImage(imageFile!.path);
 
       setState(() {
         if (response.success) {
@@ -516,7 +631,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         return;
       }
     }
-    // Capture from WiFi camera
+    // Capture from WiFi camera (ESP32)
     else if (_isConnectedToWifi && _currentFrame != null) {
       try {
         setState(() {
@@ -530,6 +645,36 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
         await tempFile.writeAsBytes(_currentFrame!);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from SLP2 (UDP H264)
+    else if (_isConnectedToSlp2) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        // Capture frame from VLC player
+        final frameBytes = await _slp2Service.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from SLP2');
+        }
+
+        _snapshotImage = frameBytes;
+
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
         setState(() {
@@ -556,7 +701,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       });
 
       // Extract text from LLM
-      final response = await _llamaService.extractText(imageFile.path);
+      final response = await _llamaService.extractText(imageFile!.path);
 
       setState(() {
         if (response.success) {
@@ -619,7 +764,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         return;
       }
     }
-    // Capture from WiFi camera
+    // Capture from WiFi camera (ESP32)
     else if (_isConnectedToWifi && _currentFrame != null) {
       try {
         setState(() {
@@ -633,6 +778,36 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
         await tempFile.writeAsBytes(_currentFrame!);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from SLP2 (UDP H264)
+    else if (_isConnectedToSlp2) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        // Capture frame from VLC player
+        final frameBytes = await _slp2Service.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from SLP2');
+        }
+
+        _snapshotImage = frameBytes;
+
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
         setState(() {
@@ -659,7 +834,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       });
 
       // Use new ML-based face recognition
-      final result = await _faceRecognitionService.recognizeFace(imageFile);
+      final result = await _faceRecognitionService.recognizeFace(imageFile!);
 
       if (!mounted) return;
 
@@ -804,6 +979,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   @override
   void dispose() {
     _wifiService.dispose();
+    _slp2Service.dispose();
     _hardwareKeyService.dispose();
     _llamaService.dispose();
     _ttsService.dispose();
@@ -866,6 +1042,31 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                             ],
                           ),
                         )
+                      // SLP2 UDP H264 stream preview (VLC player)
+                      else if (_isConnectedToSlp2 && _slp2Service.controller != null)
+                        Center(
+                          child: VlcPlayer(
+                            controller: _slp2Service.controller!,
+                            aspectRatio: 16 / 9,
+                            placeholder: const Center(
+                              child: CircularProgressIndicator(color: Colors.white),
+                            ),
+                          ),
+                        )
+                      else if (_isConnectedToSlp2)
+                        const Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              CircularProgressIndicator(color: Colors.white),
+                              SizedBox(height: 16),
+                              Text(
+                                'Connecting to SLP2 UDP stream...',
+                                style: TextStyle(color: Colors.white),
+                              ),
+                            ],
+                          ),
+                        )
                       else if (_usePhoneCamera)
                         const Center(
                           child: Column(
@@ -919,14 +1120,18 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                             Icon(
                               _isConnectedToWifi
                                   ? Icons.wifi
-                                  : _usePhoneCamera
-                                      ? Icons.camera
-                                      : Icons.wifi_off,
+                                  : _isConnectedToSlp2
+                                      ? Icons.videocam
+                                      : _usePhoneCamera
+                                          ? Icons.camera
+                                          : Icons.wifi_off,
                               color: _isConnectedToWifi
                                   ? Colors.blue
-                                  : _usePhoneCamera
-                                      ? Colors.green
-                                      : Colors.grey,
+                                  : _isConnectedToSlp2
+                                      ? Colors.purple
+                                      : _usePhoneCamera
+                                          ? Colors.green
+                                          : Colors.grey,
                               size: 32,
                             ),
                           ],
@@ -978,11 +1183,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Describe button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera)
                                     ? null
                                     : _captureAndDescribe,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _usePhoneCamera)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -995,11 +1200,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Extract text button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera)
                                     ? null
                                     : _captureAndExtractText,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _usePhoneCamera)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -1012,11 +1217,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Face recognition button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera)
                                     ? null
                                     : _captureAndRecognizeFace,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _usePhoneCamera)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
