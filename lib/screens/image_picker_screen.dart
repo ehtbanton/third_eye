@@ -209,7 +209,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, 'slp2'),
-            child: const Text('StereoPi SLP2 (UDP H264)'),
+            child: const Text('StereoPi SLP2 (RTSP)'),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, 'phone'),
@@ -229,26 +229,64 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   }
 
   Future<void> _connectToSlp2() async {
+    // Show dialog to enter IP address
+    final ipController = TextEditingController(text: Slp2StreamService.defaultSlp2Ip);
+
+    final ip = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Connect to SLP2'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Enter SLP2 IP address:'),
+            const SizedBox(height: 8),
+            TextField(
+              controller: ipController,
+              decoration: const InputDecoration(
+                hintText: '192.168.50.1',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.number,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Make sure:\n'
+              '1. Phone is connected to SLP2 WiFi\n'
+              '2. RTSP is enabled in SLP2 settings',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, ipController.text),
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
+    );
+
+    if (ip == null || ip.isEmpty) return;
+
     setState(() {
       _isLoading = true;
     });
 
-    // Show connection instructions
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Connect to WiFi: ${Slp2StreamService.defaultSsid}\n'
-            'Password: ${Slp2StreamService.defaultPassword}\n'
-            'Configure SLP2 to stream to your phone IP on port ${Slp2StreamService.streamPort}',
-          ),
-          duration: const Duration(seconds: 8),
-          backgroundColor: Colors.blue,
-        ),
-      );
-    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Connecting to SLP2 at $ip...'),
+        duration: const Duration(seconds: 3),
+        backgroundColor: Colors.blue,
+      ),
+    );
 
-    final success = await _slp2Service.connect();
+    final success = await _slp2Service.connect(ip: ip);
 
     if (success) {
       // Listen to connection state changes
@@ -273,8 +311,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         });
 
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Connected to SLP2 UDP stream'),
+          SnackBar(
+            content: Text('Connected to SLP2 at $ip'),
             backgroundColor: Colors.green,
           ),
         );
@@ -290,15 +328,15 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Failed to connect to SLP2.\n\n'
-              '${Slp2StreamService.getConnectionInstructions()}',
+              'Failed to connect to SLP2 at $ip.\n\n'
+              'Check that RTSP is enabled in SLP2 settings.',
             ),
             backgroundColor: Colors.red,
-            duration: const Duration(seconds: 10),
+            duration: const Duration(seconds: 5),
           ),
         );
 
-        _ttsService.speak('Failed to connect to SLP2 camera');
+        _ttsService.speak('Failed to connect to SLP2');
       }
     }
   }
