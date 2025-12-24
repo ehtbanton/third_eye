@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:camera/camera.dart';
-import 'package:flutter_vlc_player/flutter_vlc_player.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import '../services/llama_service.dart';
 import '../services/tts_service.dart';
 import '../services/esp32_wifi_service.dart';
@@ -1080,15 +1080,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                             ],
                           ),
                         )
-                      // SLP2 UDP H264 stream preview (VLC player)
-                      else if (_isConnectedToSlp2 && _slp2Service.controller != null)
+                      // SLP2 RTSP stream preview (media_kit)
+                      else if (_isConnectedToSlp2 && _slp2Service.videoController != null)
                         Center(
-                          child: VlcPlayer(
-                            controller: _slp2Service.controller!,
-                            aspectRatio: 16 / 9,
-                            placeholder: const Center(
-                              child: CircularProgressIndicator(color: Colors.white),
-                            ),
+                          child: Video(
+                            controller: _slp2Service.videoController!,
                           ),
                         )
                       else if (_isConnectedToSlp2)
