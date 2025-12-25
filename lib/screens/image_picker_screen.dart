@@ -11,6 +11,7 @@ import '../services/esp32_wifi_service.dart';
 import '../services/slp2_stream_service.dart';
 import '../services/hardware_key_service.dart';
 import '../services/face_recognition_service.dart';
+import '../widgets/h264_video_widget.dart';
 
 class ImagePickerScreen extends StatefulWidget {
   const ImagePickerScreen({super.key});
@@ -43,6 +44,10 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   CameraController? _cameraController;
   bool _usePhoneCamera = false;
   List<CameraDescription>? _cameras;
+
+  // Native UDP H264 streaming
+  bool _useNativeUdp = false;
+  H264VideoController? _h264Controller;
 
   @override
   void initState() {
@@ -212,6 +217,10 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
             child: const Text('StereoPi SLP2 (RTSP)'),
           ),
           TextButton(
+            onPressed: () => Navigator.pop(context, 'slp2_native'),
+            child: const Text('SLP2 Native UDP (Low Latency)'),
+          ),
+          TextButton(
             onPressed: () => Navigator.pop(context, 'phone'),
             child: const Text('Phone Camera'),
           ),
@@ -223,24 +232,26 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       await _connectToEsp32Wifi();
     } else if (choice == 'slp2') {
       await _connectToSlp2();
+    } else if (choice == 'slp2_native') {
+      await _connectToSlp2Native();
     } else if (choice == 'phone') {
       await _initializePhoneCamera();
     }
   }
 
   Future<void> _connectToSlp2() async {
-    // Show dialog to enter IP address
+    // Show dialog with IP input
     final ipController = TextEditingController(text: Slp2StreamService.defaultSlp2Ip);
 
     final ip = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Connect to SLP2'),
+        title: const Text('Connect to SLP2 (SRT)'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Enter SLP2 IP address:'),
+            const Text('SLP2 IP address:'),
             const SizedBox(height: 8),
             TextField(
               controller: ipController,
@@ -250,11 +261,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
               ),
               keyboardType: TextInputType.number,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             Text(
-              'Make sure:\n'
-              '1. Phone is connected to SLP2 WiFi\n'
-              '2. RTSP is enabled in SLP2 settings',
+              'Make sure SRT listener is enabled\non SLP2 (port 9001)',
               style: TextStyle(fontSize: 12, color: Colors.grey[600]),
             ),
           ],
@@ -280,7 +289,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Connecting to SLP2 at $ip...'),
+        content: Text('Connecting to SLP2 via SRT at $ip:9001...'),
         duration: const Duration(seconds: 3),
         backgroundColor: Colors.blue,
       ),
@@ -311,8 +320,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         });
 
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Connected to SLP2 at $ip'),
+          const SnackBar(
+            content: Text('Receiving SLP2 stream'),
             backgroundColor: Colors.green,
           ),
         );
@@ -326,19 +335,47 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         });
 
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Failed to connect to SLP2 at $ip.\n\n'
-              'Check that RTSP is enabled in SLP2 settings.',
-            ),
+          const SnackBar(
+            content: Text('Failed to start UDP listener. Check permissions.'),
             backgroundColor: Colors.red,
-            duration: const Duration(seconds: 5),
+            duration: Duration(seconds: 5),
           ),
         );
 
         _ttsService.speak('Failed to connect to SLP2');
       }
     }
+  }
+
+  Future<void> _connectToSlp2Native() async {
+    // Disconnect from other sources
+    if (_isConnectedToWifi) {
+      await _wifiService.disconnect();
+      setState(() => _isConnectedToWifi = false);
+    }
+    if (_isConnectedToSlp2) {
+      await _slp2Service.disconnect();
+      setState(() => _isConnectedToSlp2 = false);
+    }
+    if (_usePhoneCamera) {
+      await _cameraController?.dispose();
+      setState(() => _usePhoneCamera = false);
+    }
+
+    setState(() {
+      _useNativeUdp = true;
+      _isLoading = false;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Native UDP H264 stream started on port 5000.\nConfigure SLP2 to send UDP Raw H264 to your phone IP.'),
+        duration: Duration(seconds: 5),
+        backgroundColor: Colors.green,
+      ),
+    );
+
+    _ttsService.speak('Native UDP streaming started');
   }
 
   Future<void> _initializePhoneCamera() async {
@@ -1023,6 +1060,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     _ttsService.dispose();
     _faceRecognitionService.dispose();
     _cameraController?.dispose();
+    _h264Controller?.stopStream();
     super.dispose();
   }
 
@@ -1086,6 +1124,15 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                           child: Video(
                             controller: _slp2Service.videoController!,
                           ),
+                        )
+                      // Native UDP H264 stream (low latency)
+                      else if (_useNativeUdp)
+                        H264VideoWidget(
+                          port: 5000,
+                          autoStart: true,
+                          onControllerCreated: (controller) {
+                            _h264Controller = controller;
+                          },
                         )
                       else if (_isConnectedToSlp2)
                         const Center(

@@ -10,10 +10,15 @@ import kotlinx.coroutines.*
 class MainActivity: FlutterActivity() {
     private val HARDWARE_KEYS_CHANNEL = "com.example.third_eye/hardware_keys"
     private val CELLULAR_HTTP_CHANNEL = "com.example.third_eye/cellular_http"
+    private val UDP_H264_CHANNEL = "com.example.third_eye/udp_h264"
 
     private var hardwareKeysChannel: MethodChannel? = null
     private var cellularHttpChannel: MethodChannel? = null
     private var cellularHttpClient: CellularHttpClient? = null
+    private var udpH264Channel: MethodChannel? = null
+    private var udpReceiver: UdpReceiver? = null
+    private var h264Parser: H264Parser? = null
+    private var h264VideoViewFactory: H264VideoViewFactory? = null
 
     private val mainScope = CoroutineScope(Dispatchers.Main + Job())
 
@@ -99,6 +104,92 @@ class MainActivity: FlutterActivity() {
         }
 
         Log.d("MainActivity", "Cellular HTTP channel configured: $CELLULAR_HTTP_CHANNEL")
+
+        // Set up method channel for UDP H264 video receiver
+        udpH264Channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, UDP_H264_CHANNEL)
+
+        udpH264Channel!!.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "startReceiver" -> {
+                    val port = call.argument<Int>("port") ?: 5000
+                    startUdpReceiver(port)
+                    result.success(true)
+                }
+
+                "stopReceiver" -> {
+                    stopUdpReceiver()
+                    result.success(true)
+                }
+
+                "isReceiving" -> {
+                    result.success(udpReceiver?.isRunning() ?: false)
+                }
+
+                "getStats" -> {
+                    result.success(mapOf(
+                        "packetsReceived" to (udpReceiver?.getPacketsReceived() ?: 0L),
+                        "bytesReceived" to (udpReceiver?.getBytesReceived() ?: 0L),
+                        "isRunning" to (udpReceiver?.isRunning() ?: false)
+                    ))
+                }
+
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
+
+        Log.d("MainActivity", "UDP H264 channel configured: $UDP_H264_CHANNEL")
+
+        // Register H264 video view factory for platform views
+        h264VideoViewFactory = H264VideoViewFactory(flutterEngine.dartExecutor.binaryMessenger)
+        flutterEngine.platformViewsController.registry.registerViewFactory(
+            H264VideoViewFactory.VIEW_TYPE,
+            h264VideoViewFactory!!
+        )
+        Log.d("MainActivity", "H264 video view factory registered: ${H264VideoViewFactory.VIEW_TYPE}")
+    }
+
+    private fun startUdpReceiver(port: Int) {
+        // Stop existing receiver if any
+        stopUdpReceiver()
+
+        Log.i("MainActivity", "Starting UDP receiver on port $port")
+
+        // Create H264 parser with callbacks
+        h264Parser = H264Parser()
+        h264Parser?.setCallback(object : H264Parser.NalUnitCallback {
+            override fun onNalUnit(nalUnit: ByteArray, nalType: Int) {
+                // NAL unit ready for decoding
+                // Will be used when we add MediaCodec decoder
+            }
+
+            override fun onSpsReceived(sps: ByteArray) {
+                Log.i("MainActivity", "H264: SPS received (${sps.size} bytes)")
+            }
+
+            override fun onPpsReceived(pps: ByteArray) {
+                Log.i("MainActivity", "H264: PPS received (${pps.size} bytes)")
+            }
+
+            override fun onKeyFrame(nalUnit: ByteArray) {
+                Log.i("MainActivity", "H264: Keyframe (IDR) received (${nalUnit.size} bytes)")
+            }
+        })
+
+        udpReceiver = UdpReceiver(port)
+        udpReceiver?.start { data, _ ->
+            // Feed UDP data into H264 parser
+            h264Parser?.feedData(data)
+        }
+    }
+
+    private fun stopUdpReceiver() {
+        udpReceiver?.stop()
+        udpReceiver = null
+        h264Parser?.reset()
+        h264Parser = null
+        Log.i("MainActivity", "UDP receiver stopped")
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -177,6 +268,10 @@ class MainActivity: FlutterActivity() {
         cellularHttpChannel = null
         cellularHttpClient?.release()
         cellularHttpClient = null
+        stopUdpReceiver()
+        udpH264Channel = null
+        h264VideoViewFactory?.stopAllStreams()
+        h264VideoViewFactory = null
         mainScope.cancel()
         super.onDestroy()
     }
