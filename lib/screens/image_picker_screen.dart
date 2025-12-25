@@ -179,7 +179,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       print('Dialog open: $_isDialogOpen');
 
       // Trigger capture on any key press if camera is available and no dialog is open
-      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera)) {
+      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)) {
         // Button 1 (Volume Up): Take photo and describe image
         if (event.keyType == HardwareKeyType.volumeUp) {
           print('✓ Button 1 pressed - Taking photo and describing image');
@@ -640,6 +640,36 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         });
         return;
       }
+    }
+    // Capture from Native UDP H264 stream (low latency)
+    else if (_useNativeUdp && _h264Controller != null) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        // Capture frame from native H264 decoder
+        final frameBytes = await _h264Controller!.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from native UDP stream');
+        }
+
+        _snapshotImage = frameBytes;
+
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/native_udp_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
     } else {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -749,6 +779,36 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         final tempDir = await getTemporaryDirectory();
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from Native UDP H264 stream (low latency)
+    else if (_useNativeUdp && _h264Controller != null) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        // Capture frame from native H264 decoder
+        final frameBytes = await _h264Controller!.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from native UDP stream');
+        }
+
+        _snapshotImage = frameBytes;
+
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/native_udp_snapshot_$timestamp.jpg');
         await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
@@ -882,6 +942,36 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         final tempDir = await getTemporaryDirectory();
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from Native UDP H264 stream (low latency)
+    else if (_useNativeUdp && _h264Controller != null) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        // Capture frame from native H264 decoder
+        final frameBytes = await _h264Controller!.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from native UDP stream');
+        }
+
+        _snapshotImage = frameBytes;
+
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/native_udp_snapshot_$timestamp.jpg');
         await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
@@ -1203,16 +1293,20 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                                   ? Icons.wifi
                                   : _isConnectedToSlp2
                                       ? Icons.videocam
-                                      : _usePhoneCamera
-                                          ? Icons.camera
-                                          : Icons.wifi_off,
+                                      : _useNativeUdp
+                                          ? Icons.stream
+                                          : _usePhoneCamera
+                                              ? Icons.camera
+                                              : Icons.wifi_off,
                               color: _isConnectedToWifi
                                   ? Colors.blue
                                   : _isConnectedToSlp2
                                       ? Colors.purple
-                                      : _usePhoneCamera
-                                          ? Colors.green
-                                          : Colors.grey,
+                                      : _useNativeUdp
+                                          ? Colors.cyan
+                                          : _usePhoneCamera
+                                              ? Colors.green
+                                              : Colors.grey,
                               size: 32,
                             ),
                           ],
@@ -1264,11 +1358,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Describe button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndDescribe,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -1281,11 +1375,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Extract text button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndExtractText,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -1298,11 +1392,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Face recognition button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndRecognizeFace,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(

@@ -43,6 +43,9 @@ class H264VideoView(
     private var pendingSps: ByteArray? = null
     private var pendingPps: ByteArray? = null
 
+    // Pending stream start request (if called before surface is ready)
+    private var pendingStartPort: Int? = null
+
     init {
         surfaceView.holder.addCallback(this)
         surfaceView.holder.setFormat(PixelFormat.TRANSLUCENT)
@@ -65,7 +68,12 @@ class H264VideoView(
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         Log.i(TAG, "Surface created")
-        // Surface is ready - can start decoding when stream begins
+        // Surface is ready - start pending stream if any
+        pendingStartPort?.let { port ->
+            Log.i(TAG, "Processing pending stream start on port $port")
+            pendingStartPort = null
+            startStream(port)
+        }
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -87,8 +95,9 @@ class H264VideoView(
         }
 
         if (!surfaceView.holder.surface.isValid) {
-            Log.e(TAG, "Surface not valid yet")
-            return false
+            Log.i(TAG, "Surface not valid yet, queuing start request for port $port")
+            pendingStartPort = port
+            return true  // Return true since we'll start when surface is ready
         }
 
         Log.i(TAG, "Starting H264 stream on port $port")
