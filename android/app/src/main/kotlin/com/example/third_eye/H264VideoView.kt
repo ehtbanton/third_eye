@@ -129,8 +129,14 @@ class H264VideoView(
         // Create decoder (will be configured when SPS/PPS arrive)
         h264Decoder = H264Decoder()
 
-        // Start UDP receiver
-        udpReceiver = UdpReceiver(port)
+        // Start UDP receiver - bind to WiFi network if available
+        val wifiNetwork = WifiNetworkManager.currentWifiNetwork
+        if (wifiNetwork != null) {
+            Log.i(TAG, "Using WiFi network for UDP socket")
+        } else {
+            Log.w(TAG, "No WiFi network available - using default")
+        }
+        udpReceiver = UdpReceiver(port, wifiNetwork)
         udpReceiver?.start { data, _ ->
             h264Parser?.feedData(data)
         }

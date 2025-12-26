@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'native_udp_service.dart';
+import 'wifi_network_service.dart';
+import 'cellular_http_service.dart';
 
 /// Service for connecting to StereoPi SLP2 via RTSP stream.
 /// Also tests native UDP H264 receiver for low-latency streaming.
@@ -15,8 +17,12 @@ class Slp2StreamService {
   static const int udpPort = 5000;
 
   final NativeUdpService _nativeUdp = NativeUdpService();
+  final WifiNetworkService _wifiService = WifiNetworkService();
+  final CellularHttpService _cellularService = CellularHttpService();
 
   String _slp2Ip = defaultSlp2Ip;
+  bool _wifiConnected = false;
+  bool _cellularReady = false;
   Player? _player;
   VideoController? _videoController;
   bool _isConnected = false;
@@ -38,6 +44,64 @@ class Slp2StreamService {
   static void ensureInitialized() {
     MediaKit.ensureInitialized();
   }
+
+  /// Auto-connect to SLP2's WiFi network and prepare cellular for internet.
+  ///
+  /// This method:
+  /// 1. Connects to the SLP2 WiFi network (cosmostreamer)
+  /// 2. Initializes cellular network for internet traffic (Gemini API)
+  ///
+  /// Returns a map with connection status:
+  /// - 'wifi': bool - whether WiFi connection succeeded
+  /// - 'cellular': bool - whether cellular is available for internet
+  /// - 'wifiState': Map - detailed WiFi state including IP
+  Future<Map<String, dynamic>> autoConnect() async {
+    debugPrint('======================================');
+    debugPrint('SLP2: Auto-connecting to WiFi and cellular...');
+    debugPrint('======================================');
+
+    // Step 1: Connect to SLP2 WiFi
+    debugPrint('SLP2: Connecting to WiFi "$defaultSsid"...');
+    _wifiConnected = await _wifiService.connectToCm4();
+
+    if (_wifiConnected) {
+      debugPrint('SLP2: WiFi connected successfully');
+      final wifiState = await _wifiService.getWifiState();
+      debugPrint('SLP2: WiFi state: $wifiState');
+    } else {
+      debugPrint('SLP2: WiFi connection failed - user may need to connect manually');
+    }
+
+    // Step 2: Initialize cellular for internet traffic
+    debugPrint('SLP2: Initializing cellular network for internet...');
+    _cellularReady = await _cellularService.initialize();
+
+    if (_cellularReady) {
+      debugPrint('SLP2: Cellular network ready for internet traffic');
+    } else {
+      debugPrint('SLP2: Cellular network not available - internet may not work');
+    }
+
+    final wifiState = await _wifiService.getWifiState();
+
+    return {
+      'wifi': _wifiConnected,
+      'cellular': _cellularReady,
+      'wifiState': wifiState,
+    };
+  }
+
+  /// Whether connected to SLP2 WiFi
+  bool get isWifiConnected => _wifiConnected;
+
+  /// Whether cellular is ready for internet traffic
+  bool get isCellularReady => _cellularReady;
+
+  /// The WiFi network service (for UI state)
+  WifiNetworkService get wifiService => _wifiService;
+
+  /// The cellular HTTP service (for making API calls over cellular)
+  CellularHttpService get cellularService => _cellularService;
 
   Future<bool> connect({String? ip}) async {
     if (ip != null && ip.isNotEmpty) {
@@ -138,6 +202,12 @@ class Slp2StreamService {
     await _player?.dispose();
     _player = null;
     _videoController = null;
+
+    // Disconnect from WiFi and release cellular
+    await _wifiService.disconnect();
+    await _cellularService.release();
+    _wifiConnected = false;
+    _cellularReady = false;
 
     debugPrint('SLP2: Disconnected');
   }

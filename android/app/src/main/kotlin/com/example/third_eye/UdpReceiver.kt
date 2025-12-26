@@ -1,5 +1,6 @@
 package com.example.third_eye
 
+import android.net.Network
 import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -9,7 +10,7 @@ import kotlin.concurrent.thread
  * UDP packet receiver for H264 video streams.
  * Listens on a specified port and delivers received packets via callback.
  */
-class UdpReceiver(private val port: Int) {
+class UdpReceiver(private val port: Int, private val network: Network? = null) {
     companion object {
         private const val TAG = "UdpReceiver"
         private const val BUFFER_SIZE = 65535  // Max UDP packet size
@@ -41,6 +42,13 @@ class UdpReceiver(private val port: Int) {
             try {
                 socket = DatagramSocket(port)
                 socket?.reuseAddress = true
+
+                // Bind socket to specific network if provided (required for WifiNetworkSpecifier)
+                if (network != null) {
+                    network.bindSocket(socket!!)
+                    Log.i(TAG, "Socket bound to WiFi network")
+                }
+
                 Log.i(TAG, "Started listening on UDP port $port")
 
                 val buffer = ByteArray(BUFFER_SIZE)

@@ -240,13 +240,57 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   }
 
   Future<void> _connectToSlp2() async {
-    // Show dialog with IP input
+    setState(() {
+      _isLoading = true;
+    });
+
+    // Step 1: Auto-connect to SLP2 WiFi and setup cellular
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Connecting to SLP2 WiFi...'),
+        duration: Duration(seconds: 2),
+        backgroundColor: Colors.blue,
+      ),
+    );
+
+    final connectionResult = await _slp2Service.autoConnect();
+    final wifiConnected = connectionResult['wifi'] as bool;
+    final cellularReady = connectionResult['cellular'] as bool;
+
+    if (!wifiConnected) {
+      // WiFi connection failed - show manual connection dialog
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Auto-connect failed. Please connect to "${Slp2StreamService.defaultSsid}" WiFi manually.',
+            ),
+            duration: const Duration(seconds: 5),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'WiFi connected! ${cellularReady ? "Internet via cellular ready." : "Warning: No cellular for internet."}',
+            ),
+            duration: const Duration(seconds: 2),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    }
+
+    // Step 2: Show IP dialog (pre-filled with default)
     final ipController = TextEditingController(text: Slp2StreamService.defaultSlp2Ip);
 
     final ip = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Connect to SLP2 (SRT)'),
+        title: const Text('Connect to SLP2 (RTSP)'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -263,14 +307,22 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
             ),
             const SizedBox(height: 12),
             Text(
-              'Make sure SRT listener is enabled\non SLP2 (port 9001)',
-              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+              wifiConnected
+                  ? 'WiFi connected to ${Slp2StreamService.defaultSsid}'
+                  : 'Please connect to SLP2 WiFi manually',
+              style: TextStyle(
+                fontSize: 12,
+                color: wifiConnected ? Colors.green : Colors.orange,
+              ),
             ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () {
+              _slp2Service.disconnect();
+              Navigator.pop(context);
+            },
             child: const Text('Cancel'),
           ),
           TextButton(
@@ -281,15 +333,16 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       ),
     );
 
-    if (ip == null || ip.isEmpty) return;
-
-    setState(() {
-      _isLoading = true;
-    });
+    if (ip == null || ip.isEmpty) {
+      setState(() {
+        _isLoading = false;
+      });
+      return;
+    }
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Connecting to SLP2 via SRT at $ip:9001...'),
+        content: Text('Connecting to RTSP stream at $ip:554...'),
         duration: const Duration(seconds: 3),
         backgroundColor: Colors.blue,
       ),
@@ -336,7 +389,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Failed to start UDP listener. Check permissions.'),
+            content: Text('Failed to connect to RTSP stream. Check network and SLP2 settings.'),
             backgroundColor: Colors.red,
             duration: Duration(seconds: 5),
           ),
@@ -363,14 +416,57 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     }
 
     setState(() {
+      _isLoading = true;
+    });
+
+    // Step 1: Auto-connect to SLP2 WiFi and setup cellular
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Connecting to SLP2 WiFi...'),
+        duration: Duration(seconds: 2),
+        backgroundColor: Colors.blue,
+      ),
+    );
+
+    final connectionResult = await _slp2Service.autoConnect();
+    final wifiConnected = connectionResult['wifi'] as bool;
+    final cellularReady = connectionResult['cellular'] as bool;
+
+    if (!wifiConnected) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Auto-connect failed. Please connect to "${Slp2StreamService.defaultSsid}" WiFi manually.',
+            ),
+            duration: const Duration(seconds: 5),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'WiFi connected! ${cellularReady ? "Internet via cellular ready." : "Warning: No cellular for internet."}',
+            ),
+            duration: const Duration(seconds: 2),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    }
+
+    setState(() {
       _useNativeUdp = true;
       _isLoading = false;
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Native UDP H264 stream started on port 5000.\nConfigure SLP2 to send UDP Raw H264 to your phone IP.'),
-        duration: Duration(seconds: 5),
+        content: Text('Native UDP H264 stream started on port 5000.'),
+        duration: Duration(seconds: 3),
         backgroundColor: Colors.green,
       ),
     );

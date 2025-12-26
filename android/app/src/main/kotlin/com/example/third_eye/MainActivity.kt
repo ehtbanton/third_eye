@@ -11,6 +11,7 @@ class MainActivity: FlutterActivity() {
     private val HARDWARE_KEYS_CHANNEL = "com.example.third_eye/hardware_keys"
     private val CELLULAR_HTTP_CHANNEL = "com.example.third_eye/cellular_http"
     private val UDP_H264_CHANNEL = "com.example.third_eye/udp_h264"
+    private val WIFI_NETWORK_CHANNEL = "com.example.third_eye/wifi_network"
 
     private var hardwareKeysChannel: MethodChannel? = null
     private var cellularHttpChannel: MethodChannel? = null
@@ -19,6 +20,8 @@ class MainActivity: FlutterActivity() {
     private var udpReceiver: UdpReceiver? = null
     private var h264Parser: H264Parser? = null
     private var h264VideoViewFactory: H264VideoViewFactory? = null
+    private var wifiNetworkChannel: MethodChannel? = null
+    private var wifiNetworkManager: WifiNetworkManager? = null
 
     private val mainScope = CoroutineScope(Dispatchers.Main + Job())
 
@@ -140,6 +143,53 @@ class MainActivity: FlutterActivity() {
         }
 
         Log.d("MainActivity", "UDP H264 channel configured: $UDP_H264_CHANNEL")
+
+        // Set up method channel for WiFi network management
+        wifiNetworkManager = WifiNetworkManager(applicationContext)
+        wifiNetworkChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WIFI_NETWORK_CHANNEL)
+
+        wifiNetworkChannel!!.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "connectToWifi" -> {
+                    val ssid = call.argument<String>("ssid")
+                    val password = call.argument<String>("password")
+
+                    if (ssid == null || password == null) {
+                        result.error("INVALID_ARGS", "ssid and password are required", null)
+                        return@setMethodCallHandler
+                    }
+
+                    mainScope.launch {
+                        try {
+                            val success = wifiNetworkManager!!.connectToWifi(ssid, password)
+                            result.success(success)
+                        } catch (e: Exception) {
+                            result.error("WIFI_ERROR", "Failed to connect to WiFi: ${e.message}", null)
+                        }
+                    }
+                }
+
+                "disconnectWifi" -> {
+                    wifiNetworkManager!!.disconnect()
+                    result.success(true)
+                }
+
+                "isConnectedToWifi" -> {
+                    val ssid = call.argument<String>("ssid")
+                    result.success(wifiNetworkManager!!.isConnectedToWifi(ssid))
+                }
+
+                "getWifiState" -> {
+                    result.success(wifiNetworkManager!!.getWifiState())
+                }
+
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
+
+        Log.d("MainActivity", "WiFi network channel configured: $WIFI_NETWORK_CHANNEL")
 
         // Register H264 video view factory for platform views
         h264VideoViewFactory = H264VideoViewFactory(flutterEngine.dartExecutor.binaryMessenger)
@@ -272,6 +322,9 @@ class MainActivity: FlutterActivity() {
         udpH264Channel = null
         h264VideoViewFactory?.stopAllStreams()
         h264VideoViewFactory = null
+        wifiNetworkChannel = null
+        wifiNetworkManager?.disconnect()
+        wifiNetworkManager = null
         mainScope.cancel()
         super.onDestroy()
     }
