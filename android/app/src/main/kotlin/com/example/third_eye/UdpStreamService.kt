@@ -386,17 +386,6 @@ class UdpStreamService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Stop action
-        val stopIntent = Intent(this, UdpStreamService::class.java).apply {
-            action = "STOP_STREAM"
-        }
-        val stopPendingIntent = PendingIntent.getService(
-            this,
-            1,
-            stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
         // Describe action (trigger from notification)
         val describeIntent = Intent(this, UdpStreamService::class.java).apply {
             action = "TRIGGER_DESCRIBE"
@@ -415,7 +404,6 @@ class UdpStreamService : Service() {
             .setOngoing(true)
             .setContentIntent(pendingIntent)
             .addAction(android.R.drawable.ic_menu_view, "Describe", describePendingIntent)
-            .addAction(android.R.drawable.ic_media_pause, "Stop", stopPendingIntent)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
     }

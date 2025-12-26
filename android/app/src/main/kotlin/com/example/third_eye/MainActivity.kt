@@ -463,6 +463,9 @@ class MainActivity: FlutterActivity() {
     }
 
     override fun onDestroy() {
+        // Stop the foreground service when app is closed - this ensures everything stops
+        stopForegroundService()
+
         hardwareKeysChannel = null
         cellularHttpChannel = null
         cellularHttpClient?.release()
