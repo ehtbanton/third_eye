@@ -417,11 +417,6 @@ class UdpStreamService : Service() {
             .addAction(android.R.drawable.ic_menu_view, "Describe", describePendingIntent)
             .addAction(android.R.drawable.ic_media_pause, "Stop", stopPendingIntent)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .setStyle(
-                androidx.media.app.NotificationCompat.MediaStyle()
-                    .setMediaSession(mediaSession?.sessionToken)
-                    .setShowActionsInCompactView(0)
-            )
             .build()
     }
 
