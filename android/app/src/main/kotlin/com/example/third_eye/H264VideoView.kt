@@ -30,10 +30,12 @@ class H264VideoView(
     }
 
     private val surfaceView: SurfaceView = SurfaceView(context)
-    private var udpReceiver: UdpReceiver? = null
+    private var udpReceiver: UdpReceiver? = null  // Only used when service not available
     private var h264Parser: H264Parser? = null
     private var h264Decoder: H264Decoder? = null
     private var isStreaming = false
+    private var usingServiceData = false  // True if receiving data from foreground service
+    private var dataConsumer: ((ByteArray) -> Unit)? = null  // Callback registered with service
 
     // For frame capture
     private val captureHandler: Handler
@@ -87,6 +89,7 @@ class H264VideoView(
 
     /**
      * Start receiving and decoding H264 stream from UDP.
+     * Will connect to foreground service if available, otherwise starts own receiver.
      */
     fun startStream(port: Int): Boolean {
         if (isStreaming) {
@@ -129,20 +132,32 @@ class H264VideoView(
         // Create decoder (will be configured when SPS/PPS arrive)
         h264Decoder = H264Decoder()
 
-        // Start UDP receiver - bind to WiFi network if available
-        val wifiNetwork = WifiNetworkManager.currentWifiNetwork
-        if (wifiNetwork != null) {
-            Log.i(TAG, "Using WiFi network for UDP socket")
+        // Check if foreground service is running and has UDP receiver
+        val service = UdpStreamService.instance
+        if (service != null && service.isUdpReceiverRunning()) {
+            Log.i(TAG, "Connecting to foreground service UDP stream")
+            // Create callback and register with service
+            dataConsumer = { data -> h264Parser?.feedData(data) }
+            service.registerDataConsumer(dataConsumer!!)
+            usingServiceData = true
         } else {
-            Log.w(TAG, "No WiFi network available - using default")
-        }
-        udpReceiver = UdpReceiver(port, wifiNetwork)
-        udpReceiver?.start { data, _ ->
-            h264Parser?.feedData(data)
+            Log.i(TAG, "No service available, starting own UDP receiver")
+            // Start our own UDP receiver
+            val wifiNetwork = WifiNetworkManager.currentWifiNetwork
+            if (wifiNetwork != null) {
+                Log.i(TAG, "Using WiFi network for UDP socket")
+            } else {
+                Log.w(TAG, "No WiFi network available - using default")
+            }
+            udpReceiver = UdpReceiver(port, wifiNetwork)
+            udpReceiver?.start { data, _ ->
+                h264Parser?.feedData(data)
+            }
+            usingServiceData = false
         }
 
         isStreaming = true
-        Log.i(TAG, "Stream started")
+        Log.i(TAG, "Stream started (usingServiceData=$usingServiceData)")
         return true
     }
 
@@ -171,9 +186,17 @@ class H264VideoView(
     fun stopStream() {
         if (!isStreaming) return
 
-        Log.i(TAG, "Stopping stream")
+        Log.i(TAG, "Stopping stream (usingServiceData=$usingServiceData)")
         isStreaming = false
 
+        // Unregister from service if we were using it
+        if (usingServiceData && dataConsumer != null) {
+            UdpStreamService.instance?.unregisterDataConsumer(dataConsumer!!)
+            dataConsumer = null
+        }
+        usingServiceData = false
+
+        // Stop own UDP receiver if we had one
         udpReceiver?.stop()
         udpReceiver = null
 

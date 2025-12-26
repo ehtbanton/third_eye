@@ -84,23 +84,23 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     print('App lifecycle state changed: $state');
 
     if (state == AppLifecycleState.resumed) {
-      // App came back to foreground - restart UDP stream if it was active
+      // App came back to foreground - reconnect video widget to service
       _handleAppResumed();
     }
   }
 
-  /// Handle app returning to foreground - restart UDP stream if needed
+  /// Handle app returning to foreground - reconnect to service stream
   Future<void> _handleAppResumed() async {
-    print('App resumed - checking if UDP stream needs restart');
+    print('App resumed - reconnecting to stream');
 
-    // If we were using native UDP, restart the stream
+    // If we're using native UDP, reconnect the video widget to the service
     if (_useNativeUdp && _h264Controller != null) {
-      print('Restarting native UDP stream...');
-      // Stop and restart the stream to ensure fresh connection
+      print('Reconnecting video widget to service stream...');
+      // Stop current connection and reconnect (will use service data)
       _h264Controller?.stopStream();
       await Future.delayed(const Duration(milliseconds: 100));
       await _h264Controller?.startStream(5000);
-      print('Native UDP stream restarted');
+      print('Video widget reconnected');
     }
   }
 

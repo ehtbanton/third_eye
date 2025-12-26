@@ -10,6 +10,7 @@ import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.net.Network
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -26,9 +27,9 @@ import androidx.media.session.MediaButtonReceiver
 import io.flutter.plugin.common.MethodChannel
 
 /**
- * Foreground Service for handling hardware button triggers via MediaSession.
- * Enables the Bluetooth clicker to trigger scene description even when
- * the app is backgrounded or the screen is off.
+ * Foreground Service for persistent UDP streaming and MediaSession handling.
+ * Manages the UDP receiver so streaming continues even when app is backgrounded.
+ * Enables the Bluetooth clicker to trigger scene description when screen is off.
  */
 class UdpStreamService : Service() {
 
@@ -58,6 +59,15 @@ class UdpStreamService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var isStreaming = false
 
+    // UDP streaming - owned by service for persistent background operation
+    private var udpReceiver: UdpReceiver? = null
+    private var currentPort = 5000
+    private var currentNetwork: Network? = null
+
+    // Registered data consumers (video views that want to receive UDP data)
+    private val dataConsumers = mutableListOf<(ByteArray) -> Unit>()
+    private val consumersLock = Object()
+
     // MediaSession for background button handling
     private var mediaSession: MediaSessionCompat? = null
     private var audioManager: AudioManager? = null
@@ -86,17 +96,18 @@ class UdpStreamService : Service() {
 
         when (intent?.action) {
             "START_STREAM", "START_SERVICE" -> {
+                val port = intent.getIntExtra("port", 5000)
                 startForegroundWithNotification()
                 acquireWakeLock()
                 requestAudioFocus()
                 activateMediaSession()
-                isStreaming = true
-                updateNotification("Ready • Tap clicker to describe")
+                startUdpReceiver(port)
+                updateNotification("Streaming on port $port")
             }
             "STOP_STREAM", "STOP_SERVICE" -> {
+                stopUdpReceiver()
                 deactivateMediaSession()
                 abandonAudioFocus()
-                isStreaming = false
                 releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -126,6 +137,7 @@ class UdpStreamService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "Service destroyed")
+        stopUdpReceiver()
         deactivateMediaSession()
         mediaSession?.release()
         mediaSession = null
@@ -134,6 +146,75 @@ class UdpStreamService : Service() {
         instance = null
         super.onDestroy()
     }
+
+    // ========== UDP Receiver Management ==========
+
+    private fun startUdpReceiver(port: Int) {
+        if (udpReceiver != null) {
+            Log.w(TAG, "UDP receiver already running")
+            return
+        }
+
+        Log.i(TAG, "Starting UDP receiver on port $port")
+        currentPort = port
+        currentNetwork = WifiNetworkManager.currentWifiNetwork
+
+        udpReceiver = UdpReceiver(port, currentNetwork)
+        udpReceiver?.start { data, _ ->
+            // Forward data to all registered consumers
+            synchronized(consumersLock) {
+                for (consumer in dataConsumers) {
+                    try {
+                        consumer(data)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error forwarding data to consumer: ${e.message}")
+                    }
+                }
+            }
+        }
+
+        isStreaming = true
+        Log.i(TAG, "UDP receiver started")
+    }
+
+    private fun stopUdpReceiver() {
+        Log.i(TAG, "Stopping UDP receiver")
+        udpReceiver?.stop()
+        udpReceiver = null
+        isStreaming = false
+        synchronized(consumersLock) {
+            dataConsumers.clear()
+        }
+        Log.i(TAG, "UDP receiver stopped")
+    }
+
+    /**
+     * Register a callback to receive UDP data.
+     * Used by H264VideoView to receive stream data from the service.
+     */
+    fun registerDataConsumer(consumer: (ByteArray) -> Unit) {
+        synchronized(consumersLock) {
+            if (!dataConsumers.contains(consumer)) {
+                dataConsumers.add(consumer)
+                Log.i(TAG, "Data consumer registered (total: ${dataConsumers.size})")
+            }
+        }
+    }
+
+    /**
+     * Unregister a data consumer callback.
+     */
+    fun unregisterDataConsumer(consumer: (ByteArray) -> Unit) {
+        synchronized(consumersLock) {
+            dataConsumers.remove(consumer)
+            Log.i(TAG, "Data consumer unregistered (total: ${dataConsumers.size})")
+        }
+    }
+
+    /**
+     * Check if the UDP receiver is running.
+     */
+    fun isUdpReceiverRunning(): Boolean = udpReceiver != null && isStreaming
 
     // ========== MediaSession Setup ==========
 
