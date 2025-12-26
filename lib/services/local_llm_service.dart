@@ -1,91 +1,141 @@
 import 'dart:async';
+import 'cellular_azure_openai_service.dart';
 import 'cellular_gemini_service.dart';
 
+enum LlmProvider {
+  azureOpenAI,
+  gemini,
+}
+
 class LocalLlmService {
-  final CellularGeminiService _cellularGemini = CellularGeminiService();
-  bool _isInitialized = false;
+  final CellularAzureOpenAIService _azureOpenAI = CellularAzureOpenAIService();
+  final CellularGeminiService _gemini = CellularGeminiService();
 
-  /// Initialize the Gemini API service (now using cellular network)
-  Future<bool> initialize(String modelPath, String mmprojPath) async {
+  LlmProvider _currentProvider = LlmProvider.gemini;
+  bool _azureInitialized = false;
+  bool _geminiInitialized = false;
+
+  /// Get current provider
+  LlmProvider get currentProvider => _currentProvider;
+
+  /// Set the LLM provider to use
+  Future<bool> setProvider(LlmProvider provider) async {
+    _currentProvider = provider;
+    print('Switched LLM provider to: ${provider.name}');
+
+    // Initialize the selected provider if not already done
+    if (provider == LlmProvider.azureOpenAI && !_azureInitialized) {
+      return await _initializeAzure();
+    } else if (provider == LlmProvider.gemini && !_geminiInitialized) {
+      return await _initializeGemini();
+    }
+
+    return true;
+  }
+
+  Future<bool> _initializeAzure() async {
     try {
-      print('Initializing Gemini API with cellular routing...');
-      _isInitialized = await _cellularGemini.initialize();
-
-      if (_isInitialized) {
-        print('✓ Gemini API initialized successfully (cellular routing enabled)');
+      print('Initializing Azure OpenAI with cellular routing...');
+      _azureInitialized = await _azureOpenAI.initialize();
+      if (_azureInitialized) {
+        print('✓ Azure OpenAI initialized successfully');
       } else {
-        print('✗ Failed to initialize Gemini API with cellular routing');
+        print('✗ Failed to initialize Azure OpenAI');
       }
-
-      return _isInitialized;
+      return _azureInitialized;
     } catch (e) {
-      print('Failed to initialize Gemini API: $e');
+      print('Failed to initialize Azure OpenAI: $e');
       return false;
     }
   }
 
-  /// Generate a description for an image using Gemini (via cellular network)
-  Future<String> describeImage(String imagePath) async {
-    print('describeImage called with: $imagePath');
-
-    if (!_isInitialized) {
-      print('ERROR: Service not initialized');
-      throw Exception('Service not initialized. Please initialize first.');
-    }
-
+  Future<bool> _initializeGemini() async {
     try {
-      return await _cellularGemini.describeImage(imagePath);
+      print('Initializing Gemini with cellular routing...');
+      _geminiInitialized = await _gemini.initialize();
+      if (_geminiInitialized) {
+        print('✓ Gemini initialized successfully');
+      } else {
+        print('✗ Failed to initialize Gemini');
+      }
+      return _geminiInitialized;
     } catch (e) {
-      print('ERROR in describeImage: $e');
-      throw Exception('Failed to generate description: $e');
+      print('Failed to initialize Gemini: $e');
+      return false;
     }
   }
 
-  /// Extract text from an image using Gemini (via cellular network)
-  Future<String> extractText(String imagePath) async {
-    print('extractText called with: $imagePath');
+  /// Initialize the default LLM provider (Gemini)
+  Future<bool> initialize(String modelPath, String mmprojPath) async {
+    // Initialize the default provider (Gemini)
+    return await _initializeGemini();
+  }
 
-    if (!_isInitialized) {
-      print('ERROR: Service not initialized');
-      throw Exception('Service not initialized. Please initialize first.');
+  /// Generate a description for an image using the selected provider
+  Future<String> describeImage(String imagePath) async {
+    print('describeImage called with: $imagePath (provider: ${_currentProvider.name})');
+
+    if (_currentProvider == LlmProvider.azureOpenAI) {
+      if (!_azureInitialized) {
+        throw Exception('Azure OpenAI not initialized. Please initialize first.');
+      }
+      return await _azureOpenAI.describeImage(imagePath);
+    } else {
+      if (!_geminiInitialized) {
+        throw Exception('Gemini not initialized. Please initialize first.');
+      }
+      return await _gemini.describeImage(imagePath);
     }
+  }
 
-    try {
-      return await _cellularGemini.extractText(imagePath);
-    } catch (e) {
-      print('ERROR in extractText: $e');
-      throw Exception('Failed to extract text: $e');
+  /// Extract text from an image using the selected provider
+  Future<String> extractText(String imagePath) async {
+    print('extractText called with: $imagePath (provider: ${_currentProvider.name})');
+
+    if (_currentProvider == LlmProvider.azureOpenAI) {
+      if (!_azureInitialized) {
+        throw Exception('Azure OpenAI not initialized. Please initialize first.');
+      }
+      return await _azureOpenAI.extractText(imagePath);
+    } else {
+      if (!_geminiInitialized) {
+        throw Exception('Gemini not initialized. Please initialize first.');
+      }
+      return await _gemini.extractText(imagePath);
     }
   }
 
   /// Recognize face in an image using ML Kit and embeddings
-  /// This method is now a wrapper that maintains backward compatibility
-  /// The actual recognition is handled by FaceRecognitionService
-  /// Returns: 'no_face' if no clear single face, person name if matched, or 'unknown' if new face
+  /// This method is kept for backward compatibility
   Future<String> recognizeFace(String imagePath, List<String> knownFacePaths, Map<String, String> faceNameMap) async {
     print('recognizeFace called with: $imagePath (using ML Kit pipeline)');
-
-    // Note: This method is kept for backward compatibility
-    // The new approach uses FaceRecognitionService.recognizeFace() directly
-    // which provides better quality feedback and uses embeddings-based matching
-
-    // For backward compatibility, we'll return simple strings
-    // But the UI should use FaceRecognitionService.recognizeFace() directly for better results
     return 'deprecated_use_FaceRecognitionService';
   }
 
-  /// Check if the service is initialized
-  bool get isInitialized => _isInitialized;
+  /// Check if the current provider is initialized
+  bool get isInitialized {
+    if (_currentProvider == LlmProvider.azureOpenAI) {
+      return _azureInitialized;
+    } else {
+      return _geminiInitialized;
+    }
+  }
 
-  /// Check if cellular network is available for Gemini requests
+  /// Check if cellular network is available
   Future<bool> isCellularAvailable() async {
-    return await _cellularGemini.isCellularAvailable();
+    if (_currentProvider == LlmProvider.azureOpenAI) {
+      return await _azureOpenAI.isCellularAvailable();
+    } else {
+      return await _gemini.isCellularAvailable();
+    }
   }
 
   /// Dispose of resources
   Future<void> dispose() async {
-    await _cellularGemini.dispose();
-    _isInitialized = false;
-    print('Gemini service disposed');
+    await _azureOpenAI.dispose();
+    await _gemini.dispose();
+    _azureInitialized = false;
+    _geminiInitialized = false;
+    print('LLM services disposed');
   }
 }

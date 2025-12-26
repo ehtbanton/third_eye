@@ -3,44 +3,65 @@ import 'dart:io';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'cellular_http_service.dart';
 
-/// Gemini API service that routes all requests through cellular network
-/// Uses Gemini REST API directly via CellularHttpService
-class CellularGeminiService {
+/// Azure OpenAI service that routes all requests through cellular network
+/// Uses Azure OpenAI REST API directly via CellularHttpService
+class CellularAzureOpenAIService {
   final CellularHttpService _cellularHttp = CellularHttpService();
+  String? _endpoint;
   String? _apiKey;
+  String? _deploymentName;
+  String? _apiVersion;
   bool _isInitialized = false;
-
-  static const String _geminiApiBaseUrl = 'https://generativelanguage.googleapis.com/v1beta';
-  static const String _modelName = 'gemini-2.0-flash-exp';
 
   /// Initialize the service
   /// Must be called before making any API requests
   Future<bool> initialize() async {
     try {
-      // Load API key from environment
-      _apiKey = dotenv.env['GEMINI_API_KEY'];
-      if (_apiKey == null || _apiKey!.isEmpty || _apiKey == 'your_api_key_here') {
-        print('ERROR: GEMINI_API_KEY not set in .env file');
+      // Load configuration from environment
+      _endpoint = dotenv.env['AZURE_OPENAI_ENDPOINT'];
+      _apiKey = dotenv.env['AZURE_OPENAI_API_KEY'];
+      _deploymentName = dotenv.env['AZURE_OPENAI_DEPLOYMENT_NAME'];
+      _apiVersion = dotenv.env['AZURE_OPENAI_API_VERSION'] ?? '2024-02-15-preview';
+
+      if (_endpoint == null || _endpoint!.isEmpty || _endpoint!.contains('your-resource')) {
+        print('ERROR: AZURE_OPENAI_ENDPOINT not set in .env file');
+        return false;
+      }
+      if (_apiKey == null || _apiKey!.isEmpty || _apiKey!.contains('your-api-key')) {
+        print('ERROR: AZURE_OPENAI_API_KEY not set in .env file');
+        return false;
+      }
+      if (_deploymentName == null || _deploymentName!.isEmpty) {
+        print('ERROR: AZURE_OPENAI_DEPLOYMENT_NAME not set in .env file');
         return false;
       }
 
       // Initialize cellular network
-      print('Initializing cellular network for Gemini API...');
+      print('Initializing cellular network for Azure OpenAI...');
       final cellularAvailable = await _cellularHttp.initialize();
 
       if (!cellularAvailable) {
         print('ERROR: Cellular network not available. Make sure mobile data is enabled.');
-        print('Gemini API requests will fail without cellular data.');
+        print('Azure OpenAI requests will fail without cellular data.');
         return false;
       }
 
       _isInitialized = true;
-      print('✓ Cellular Gemini service initialized with cellular network bound');
+      print('✓ Cellular Azure OpenAI service initialized with cellular network bound');
       return true;
     } catch (e) {
-      print('Failed to initialize Cellular Gemini service: $e');
+      print('Failed to initialize Cellular Azure OpenAI service: $e');
       return false;
     }
+  }
+
+  /// Build the Azure OpenAI API URL
+  String _buildApiUrl() {
+    // Remove trailing slash from endpoint if present
+    final baseUrl = _endpoint!.endsWith('/')
+        ? _endpoint!.substring(0, _endpoint!.length - 1)
+        : _endpoint!;
+    return '$baseUrl/openai/deployments/$_deploymentName/chat/completions?api-version=$_apiVersion';
   }
 
   /// Ensure cellular network is available, reinitialize if needed
@@ -58,10 +79,10 @@ class CellularGeminiService {
     }
   }
 
-  /// Make a request to Gemini with retry logic
+  /// Make a request to Azure OpenAI with retry logic
   Future<String> _makeRequest(Map<String, dynamic> requestBody) async {
-    final url = '$_geminiApiBaseUrl/models/$_modelName:generateContent?key=$_apiKey';
-    print('Sending request to Gemini API via cellular...');
+    final url = _buildApiUrl();
+    print('Sending request to Azure OpenAI via cellular...');
     print('URL: $url');
 
     String? responseJson;
@@ -72,7 +93,10 @@ class CellularGeminiService {
       try {
         responseJson = await _cellularHttp.post(
           url: url,
-          headers: {'Content-Type': 'application/json'},
+          headers: {
+            'Content-Type': 'application/json',
+            'api-key': _apiKey!,
+          },
           body: requestBody,
           contentType: 'application/json',
         );
@@ -95,17 +119,22 @@ class CellularGeminiService {
     // Parse response
     final response = jsonDecode(responseJson);
 
-    if (response['candidates'] == null || response['candidates'].isEmpty) {
-      throw Exception('No response from Gemini API');
+    // Check for errors
+    if (response['error'] != null) {
+      throw Exception('Azure OpenAI error: ${response['error']['message']}');
     }
 
-    final text = response['candidates'][0]['content']['parts'][0]['text'] as String?;
-    print('Gemini response: $text');
+    if (response['choices'] == null || response['choices'].isEmpty) {
+      throw Exception('No response from Azure OpenAI');
+    }
+
+    final text = response['choices'][0]['message']['content'] as String?;
+    print('Azure OpenAI response: $text');
 
     return text?.trim() ?? '';
   }
 
-  /// Generate image description using Gemini API over cellular
+  /// Generate image description using Azure OpenAI over cellular
   Future<String> describeImage(String imagePath) async {
     print('describeImage called with: $imagePath');
 
@@ -127,27 +156,24 @@ class CellularGeminiService {
       final base64Image = base64Encode(imageBytes);
       print('Image encoded: ${base64Image.length} base64 chars');
 
-      // Build Gemini API request
+      // Build Azure OpenAI request
       final requestBody = {
-        'contents': [
+        'messages': [
           {
-            'parts': [
-              {'text': 'Describe this image in one sentence.'},
+            'role': 'user',
+            'content': [
+              {'type': 'text', 'text': 'Describe this image in one sentence.'},
               {
-                'inline_data': {
-                  'mime_type': 'image/jpeg',
-                  'data': base64Image,
+                'type': 'image_url',
+                'image_url': {
+                  'url': 'data:image/jpeg;base64,$base64Image',
                 }
               }
             ]
           }
         ],
-        'generationConfig': {
-          'temperature': 0.4,
-          'topK': 32,
-          'topP': 1,
-          'maxOutputTokens': 1024,
-        }
+        'max_tokens': 1024,
+        'temperature': 0.4,
       };
 
       final result = await _makeRequest(requestBody);
@@ -158,7 +184,7 @@ class CellularGeminiService {
     }
   }
 
-  /// Extract text from image using Gemini API over cellular
+  /// Extract text from image using Azure OpenAI over cellular
   Future<String> extractText(String imagePath) async {
     print('extractText called with: $imagePath');
 
@@ -180,27 +206,24 @@ class CellularGeminiService {
       final base64Image = base64Encode(imageBytes);
       print('Image encoded: ${base64Image.length} base64 chars');
 
-      // Build Gemini API request
+      // Build Azure OpenAI request
       final requestBody = {
-        'contents': [
+        'messages': [
           {
-            'parts': [
-              {'text': 'Write out any text that is visible on screen, and nothing else.'},
+            'role': 'user',
+            'content': [
+              {'type': 'text', 'text': 'Write out any text that is visible on screen, and nothing else.'},
               {
-                'inline_data': {
-                  'mime_type': 'image/jpeg',
-                  'data': base64Image,
+                'type': 'image_url',
+                'image_url': {
+                  'url': 'data:image/jpeg;base64,$base64Image',
                 }
               }
             ]
           }
         ],
-        'generationConfig': {
-          'temperature': 0.1,
-          'topK': 32,
-          'topP': 1,
-          'maxOutputTokens': 2048,
-        }
+        'max_tokens': 2048,
+        'temperature': 0.1,
       };
 
       final result = await _makeRequest(requestBody);
@@ -224,6 +247,8 @@ class CellularGeminiService {
     await _cellularHttp.release();
     _isInitialized = false;
     _apiKey = null;
-    print('Cellular Gemini service disposed');
+    _endpoint = null;
+    _deploymentName = null;
+    print('Cellular Azure OpenAI service disposed');
   }
 }

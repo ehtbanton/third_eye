@@ -54,6 +54,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   // Camera source selection
   CameraSource _selectedSource = CameraSource.slp2Udp;
 
+  // LLM provider selection
+  LlmProvider _selectedLlmProvider = LlmProvider.gemini;
+
   // Phone camera fallback
   CameraController? _cameraController;
   bool _usePhoneCamera = false;
@@ -525,6 +528,34 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       case CameraSource.phone:
         await _initializePhoneCamera();
         break;
+    }
+  }
+
+  /// Switch to a different LLM provider
+  Future<void> _switchLlmProvider(LlmProvider provider) async {
+    if (_selectedLlmProvider == provider) return;
+
+    setState(() {
+      _selectedLlmProvider = provider;
+    });
+
+    final success = await _llamaService.setProvider(provider);
+    if (!success && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to initialize ${_getLlmProviderLabel(provider)}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  String _getLlmProviderLabel(LlmProvider provider) {
+    switch (provider) {
+      case LlmProvider.azureOpenAI:
+        return 'Azure GPT-4o';
+      case LlmProvider.gemini:
+        return 'Gemini Flash';
     }
   }
 
@@ -1493,47 +1524,80 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                         ),
                       ),
 
-                      // Source selection dropdown (top left)
+                      // Source and LLM selection dropdowns (top left)
                       Positioned(
                         top: 40,
                         left: 16,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.7),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              // Hardware key status icon
-                              Icon(
-                                _hardwareKeysActive ? Icons.keyboard : Icons.keyboard_outlined,
-                                color: _hardwareKeysActive ? Colors.green : Colors.grey,
-                                size: 20,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Camera source dropdown
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.7),
+                                borderRadius: BorderRadius.circular(8),
                               ),
-                              const SizedBox(width: 8),
-                              // Source dropdown
-                              DropdownButton<CameraSource>(
-                                value: _selectedSource,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  // Hardware key status icon
+                                  Icon(
+                                    _hardwareKeysActive ? Icons.keyboard : Icons.keyboard_outlined,
+                                    color: _hardwareKeysActive ? Colors.green : Colors.grey,
+                                    size: 20,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  // Source dropdown
+                                  DropdownButton<CameraSource>(
+                                    value: _selectedSource,
+                                    dropdownColor: Colors.grey[900],
+                                    underline: const SizedBox(),
+                                    icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+                                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                                    items: CameraSource.values.map((source) {
+                                      return DropdownMenuItem<CameraSource>(
+                                        value: source,
+                                        child: Text(source.label),
+                                      );
+                                    }).toList(),
+                                    onChanged: _isLoading ? null : (source) {
+                                      if (source != null) {
+                                        _switchSource(source);
+                                      }
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            // LLM provider dropdown
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.7),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: DropdownButton<LlmProvider>(
+                                value: _selectedLlmProvider,
                                 dropdownColor: Colors.grey[900],
                                 underline: const SizedBox(),
                                 icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
                                 style: const TextStyle(color: Colors.white, fontSize: 14),
-                                items: CameraSource.values.map((source) {
-                                  return DropdownMenuItem<CameraSource>(
-                                    value: source,
-                                    child: Text(source.label),
+                                items: LlmProvider.values.map((provider) {
+                                  return DropdownMenuItem<LlmProvider>(
+                                    value: provider,
+                                    child: Text(_getLlmProviderLabel(provider)),
                                   );
                                 }).toList(),
-                                onChanged: _isLoading ? null : (source) {
-                                  if (source != null) {
-                                    _switchSource(source);
+                                onChanged: _isLoading ? null : (provider) {
+                                  if (provider != null) {
+                                    _switchLlmProvider(provider);
                                   }
                                 },
                               ),
-                            ],
-                          ),
+                            ),
+                          ],
                         ),
                       ),
 

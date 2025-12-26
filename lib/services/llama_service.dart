@@ -1,5 +1,6 @@
 import '../models/image_description.dart';
 import 'local_llm_service.dart';
+export 'local_llm_service.dart' show LlmProvider;
 
 class LlamaService {
   final LocalLlmService _localLlm = LocalLlmService();
@@ -78,6 +79,14 @@ class LlamaService {
   Future<bool> checkServerHealth() async {
     return _isInitialized && _localLlm.isInitialized;
   }
+
+  /// Set the LLM provider
+  Future<bool> setProvider(LlmProvider provider) async {
+    return await _localLlm.setProvider(provider);
+  }
+
+  /// Get current provider
+  LlmProvider get currentProvider => _localLlm.currentProvider;
 
   /// Check if model needs to be downloaded (always true for API)
   Future<bool> isModelDownloaded() async {
