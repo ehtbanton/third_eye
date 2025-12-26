@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -11,6 +12,7 @@ import '../services/esp32_wifi_service.dart';
 import '../services/slp2_stream_service.dart';
 import '../services/hardware_key_service.dart';
 import '../services/face_recognition_service.dart';
+import '../services/foreground_service.dart';
 import '../widgets/h264_video_widget.dart';
 
 class ImagePickerScreen extends StatefulWidget {
@@ -31,13 +33,16 @@ enum CameraSource {
   const CameraSource(this.label);
 }
 
-class _ImagePickerScreenState extends State<ImagePickerScreen> {
+class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindingObserver {
   final LlamaService _llamaService = LlamaService();
   final TtsService _ttsService = TtsService();
   final Esp32WifiService _wifiService = Esp32WifiService();
   final Slp2StreamService _slp2Service = Slp2StreamService();
   final HardwareKeyService _hardwareKeyService = HardwareKeyService();
   final FaceRecognitionService _faceRecognitionService = FaceRecognitionService();
+  final ForegroundService _foregroundService = ForegroundService();
+  StreamSubscription<Map<String, dynamic>>? _foregroundTriggerSubscription;
+  bool _backgroundServiceRunning = false;
 
   Uint8List? _currentFrame;
   Uint8List? _snapshotImage;
@@ -69,7 +74,34 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initializeServices();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    print('App lifecycle state changed: $state');
+
+    if (state == AppLifecycleState.resumed) {
+      // App came back to foreground - restart UDP stream if it was active
+      _handleAppResumed();
+    }
+  }
+
+  /// Handle app returning to foreground - restart UDP stream if needed
+  Future<void> _handleAppResumed() async {
+    print('App resumed - checking if UDP stream needs restart');
+
+    // If we were using native UDP, restart the stream
+    if (_useNativeUdp && _h264Controller != null) {
+      print('Restarting native UDP stream...');
+      // Stop and restart the stream to ensure fresh connection
+      _h264Controller?.stopStream();
+      await Future.delayed(const Duration(milliseconds: 100));
+      await _h264Controller?.startStream(5000);
+      print('Native UDP stream restarted');
+    }
   }
 
   Future<void> _initializeServices() async {
@@ -158,6 +190,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
           _ttsService.speak('Failed to initialize. Please enable mobile data.');
         }
 
+        // Auto-start background service for persistent operation
+        await _startBackgroundService();
+
         // Auto-connect to SLP2 UDP (default source)
         _connectToSlp2Native();
       }
@@ -216,6 +251,95 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         print('⚠ Button press ignored - conditions not met for capture');
       }
     });
+
+    // Also listen to triggers from the background foreground service
+    _setupForegroundServiceListener();
+  }
+
+  /// Setup listener for triggers from the background foreground service.
+  /// This enables scene description even when app is backgrounded or screen is off.
+  void _setupForegroundServiceListener() {
+    _foregroundTriggerSubscription = _foregroundService.triggerStream.listen((event) {
+      print('=== Background Service Trigger ===');
+      print('Source: ${event['source']}');
+      print('Timestamp: ${event['timestamp']}');
+      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp}');
+      print('Server available: $_serverAvailable');
+      print('Is loading: $_isLoading');
+
+      // Trigger capture if camera is available
+      if (!_isLoading && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)) {
+        print('✓ Background trigger - Taking photo and describing image');
+        _captureAndDescribe();
+      } else {
+        print('⚠ Background trigger ignored - conditions not met for capture');
+        _ttsService.speak('Cannot capture. Camera or server not ready.');
+      }
+    });
+  }
+
+  /// Start the background foreground service for persistent operation.
+  /// This keeps the UDP receiver alive and enables hardware button triggers
+  /// even when the app is minimized or the screen is off.
+  Future<void> _startBackgroundService() async {
+    if (_backgroundServiceRunning) {
+      print('Background service already running');
+      return;
+    }
+
+    // Request notification permission first (required on Android 13+)
+    if (!await _foregroundService.hasNotificationPermission()) {
+      await _foregroundService.requestNotificationPermission();
+    }
+
+    // Request battery optimization exemption for reliable background operation
+    await _foregroundService.requestBatteryOptimizationExemption();
+
+    // Start the service
+    final success = await _foregroundService.startService(port: 5000);
+    if (success) {
+      setState(() {
+        _backgroundServiceRunning = true;
+      });
+      print('Background service started successfully');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Background service started. Clicker works even with screen off.'),
+            duration: Duration(seconds: 3),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } else {
+      print('Failed to start background service');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to start background service'),
+            duration: Duration(seconds: 3),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Stop the background foreground service.
+  Future<void> _stopBackgroundService() async {
+    await _foregroundService.stopService();
+    setState(() {
+      _backgroundServiceRunning = false;
+    });
+    print('Background service stopped');
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Background service stopped'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   Future<void> _showCameraSourceDialog() async {
@@ -1354,6 +1478,10 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    // Stop background service when app is closed
+    _foregroundService.stopService();
+    _foregroundTriggerSubscription?.cancel();
     _wifiService.dispose();
     _slp2Service.dispose();
     _hardwareKeyService.dispose();

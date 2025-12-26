@@ -1,7 +1,17 @@
 package com.example.third_eye
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.KeyEvent
 import android.util.Log
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -12,6 +22,7 @@ class MainActivity: FlutterActivity() {
     private val CELLULAR_HTTP_CHANNEL = "com.example.third_eye/cellular_http"
     private val UDP_H264_CHANNEL = "com.example.third_eye/udp_h264"
     private val WIFI_NETWORK_CHANNEL = "com.example.third_eye/wifi_network"
+    private val FOREGROUND_SERVICE_CHANNEL = "com.example.third_eye/foreground_service"
 
     private var hardwareKeysChannel: MethodChannel? = null
     private var cellularHttpChannel: MethodChannel? = null
@@ -22,8 +33,13 @@ class MainActivity: FlutterActivity() {
     private var h264VideoViewFactory: H264VideoViewFactory? = null
     private var wifiNetworkChannel: MethodChannel? = null
     private var wifiNetworkManager: WifiNetworkManager? = null
+    private var foregroundServiceChannel: MethodChannel? = null
 
     private val mainScope = CoroutineScope(Dispatchers.Main + Job())
+
+    companion object {
+        private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1001
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -191,6 +207,62 @@ class MainActivity: FlutterActivity() {
 
         Log.d("MainActivity", "WiFi network channel configured: $WIFI_NETWORK_CHANNEL")
 
+        // Set up method channel for foreground service control
+        foregroundServiceChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, FOREGROUND_SERVICE_CHANNEL)
+
+        foregroundServiceChannel!!.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "startService" -> {
+                    val port = call.argument<Int>("port") ?: 5000
+                    val success = startForegroundService(port)
+                    result.success(success)
+                }
+
+                "stopService" -> {
+                    stopForegroundService()
+                    result.success(true)
+                }
+
+                "isServiceRunning" -> {
+                    result.success(UdpStreamService.instance?.isStreaming() ?: false)
+                }
+
+                "getServiceStats" -> {
+                    val stats = UdpStreamService.instance?.getStats() ?: mapOf(
+                        "isStreaming" to false,
+                        "port" to 0,
+                        "packetsReceived" to 0L,
+                        "bytesReceived" to 0L,
+                        "hasNetwork" to false
+                    )
+                    result.success(stats)
+                }
+
+                "requestNotificationPermission" -> {
+                    requestNotificationPermission()
+                    result.success(true)
+                }
+
+                "hasNotificationPermission" -> {
+                    result.success(hasNotificationPermission())
+                }
+
+                "requestBatteryOptimizationExemption" -> {
+                    requestBatteryOptimizationExemption()
+                    result.success(true)
+                }
+
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
+
+        // Set the method channel on the service so it can send callbacks to Flutter
+        UdpStreamService.flutterMethodChannel = foregroundServiceChannel
+
+        Log.d("MainActivity", "Foreground service channel configured: $FOREGROUND_SERVICE_CHANNEL")
+
         // Register H264 video view factory for platform views
         h264VideoViewFactory = H264VideoViewFactory(flutterEngine.dartExecutor.binaryMessenger)
         flutterEngine.platformViewsController.registry.registerViewFactory(
@@ -313,6 +385,83 @@ class MainActivity: FlutterActivity() {
         return super.onKeyUp(keyCode, event)
     }
 
+    // ========== Foreground Service Methods ==========
+
+    private fun startForegroundService(port: Int): Boolean {
+        Log.i("MainActivity", "Starting foreground service on port $port")
+
+        val serviceIntent = Intent(this, UdpStreamService::class.java).apply {
+            action = "START_STREAM"
+            putExtra("port", port)
+        }
+
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+            // Save state for boot recovery
+            BootReceiver.saveServiceState(this, true, port)
+            Log.i("MainActivity", "Foreground service started successfully")
+            true
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to start foreground service: ${e.message}")
+            false
+        }
+    }
+
+    private fun stopForegroundService() {
+        Log.i("MainActivity", "Stopping foreground service")
+
+        val serviceIntent = Intent(this, UdpStreamService::class.java).apply {
+            action = "STOP_STREAM"
+        }
+
+        try {
+            startService(serviceIntent)
+            // Clear saved state
+            BootReceiver.saveServiceState(this, false, 5000)
+            Log.i("MainActivity", "Foreground service stop requested")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to stop foreground service: ${e.message}")
+        }
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    NOTIFICATION_PERMISSION_REQUEST_CODE
+                )
+            }
+        }
+    }
+
+    private fun hasNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            NotificationManagerCompat.from(this).areNotificationsEnabled()
+        }
+    }
+
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            }
+        }
+    }
+
     override fun onDestroy() {
         hardwareKeysChannel = null
         cellularHttpChannel = null
@@ -325,6 +474,7 @@ class MainActivity: FlutterActivity() {
         wifiNetworkChannel = null
         wifiNetworkManager?.disconnect()
         wifiNetworkManager = null
+        foregroundServiceChannel = null
         mainScope.cancel()
         super.onDestroy()
     }
