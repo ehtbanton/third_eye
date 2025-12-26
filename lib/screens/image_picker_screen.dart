@@ -20,6 +20,17 @@ class ImagePickerScreen extends StatefulWidget {
   State<ImagePickerScreen> createState() => _ImagePickerScreenState();
 }
 
+// Camera source options
+enum CameraSource {
+  slp2Udp('SLP2 UDP'),
+  slp2Rtsp('SLP2 RTSP'),
+  esp32('ESP32-CAM'),
+  phone('Phone');
+
+  final String label;
+  const CameraSource(this.label);
+}
+
 class _ImagePickerScreenState extends State<ImagePickerScreen> {
   final LlamaService _llamaService = LlamaService();
   final TtsService _ttsService = TtsService();
@@ -39,6 +50,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   bool _isConnectedToSlp2 = false;
   bool _hardwareKeysActive = false;
   bool _isDialogOpen = false;
+
+  // Camera source selection
+  CameraSource _selectedSource = CameraSource.slp2Udp;
 
   // Phone camera fallback
   CameraController? _cameraController;
@@ -141,8 +155,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
           _ttsService.speak('Failed to initialize. Please enable mobile data.');
         }
 
-        // Show dialog to select camera source
-        _showCameraSourceDialog();
+        // Auto-connect to SLP2 UDP (default source)
+        _connectToSlp2Native();
       }
     } catch (e) {
       setState(() {
@@ -240,8 +254,23 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   }
 
   Future<void> _connectToSlp2() async {
+    // Disconnect from other sources
+    if (_isConnectedToWifi) {
+      await _wifiService.disconnect();
+      setState(() => _isConnectedToWifi = false);
+    }
+    if (_useNativeUdp) {
+      await _h264Controller?.stopStream();
+      setState(() => _useNativeUdp = false);
+    }
+    if (_usePhoneCamera) {
+      await _cameraController?.dispose();
+      setState(() => _usePhoneCamera = false);
+    }
+
     setState(() {
       _isLoading = true;
+      _selectedSource = CameraSource.slp2Rtsp;
     });
 
     // Step 1: Auto-connect to SLP2 WiFi and setup cellular
@@ -461,6 +490,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     setState(() {
       _useNativeUdp = true;
       _isLoading = false;
+      _selectedSource = CameraSource.slp2Udp;
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -474,7 +504,45 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     _ttsService.speak('Native UDP streaming started');
   }
 
+  /// Switch to a different camera source
+  Future<void> _switchSource(CameraSource source) async {
+    if (_selectedSource == source) return;
+
+    setState(() {
+      _selectedSource = source;
+    });
+
+    switch (source) {
+      case CameraSource.slp2Udp:
+        await _connectToSlp2Native();
+        break;
+      case CameraSource.slp2Rtsp:
+        await _connectToSlp2();
+        break;
+      case CameraSource.esp32:
+        await _connectToEsp32Wifi();
+        break;
+      case CameraSource.phone:
+        await _initializePhoneCamera();
+        break;
+    }
+  }
+
   Future<void> _initializePhoneCamera() async {
+    // Disconnect from other sources
+    if (_isConnectedToWifi) {
+      await _wifiService.disconnect();
+      setState(() => _isConnectedToWifi = false);
+    }
+    if (_isConnectedToSlp2) {
+      await _slp2Service.disconnect();
+      setState(() => _isConnectedToSlp2 = false);
+    }
+    if (_useNativeUdp) {
+      await _h264Controller?.stopStream();
+      setState(() => _useNativeUdp = false);
+    }
+
     print('=== Phone Camera Initialization Started ===');
     print('Available cameras: ${_cameras?.length ?? 0}');
 
@@ -527,6 +595,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         setState(() {
           _usePhoneCamera = true;
           _isLoading = false;
+          _selectedSource = CameraSource.phone;
         });
 
         ScaffoldMessenger.of(context).showSnackBar(
@@ -581,8 +650,23 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   }
 
   Future<void> _connectToEsp32Wifi() async {
+    // Disconnect from other sources
+    if (_isConnectedToSlp2) {
+      await _slp2Service.disconnect();
+      setState(() => _isConnectedToSlp2 = false);
+    }
+    if (_useNativeUdp) {
+      await _h264Controller?.stopStream();
+      setState(() => _useNativeUdp = false);
+    }
+    if (_usePhoneCamera) {
+      await _cameraController?.dispose();
+      setState(() => _usePhoneCamera = false);
+    }
+
     setState(() {
       _isLoading = true;
+      _selectedSource = CameraSource.esp32;
     });
 
     // Inform user to connect to ESP32-CAM WiFi network first
@@ -1409,33 +1493,44 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                         ),
                       ),
 
-                      // Hardware key status indicator (top left)
+                      // Source selection dropdown (top left)
                       Positioned(
                         top: 40,
                         left: 16,
                         child: Container(
-                          padding: const EdgeInsets.all(8),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                           decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.5),
+                            color: Colors.black.withOpacity(0.7),
                             borderRadius: BorderRadius.circular(8),
                           ),
-                          child: Column(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
+                              // Hardware key status icon
                               Icon(
                                 _hardwareKeysActive ? Icons.keyboard : Icons.keyboard_outlined,
                                 color: _hardwareKeysActive ? Colors.green : Colors.grey,
-                                size: 32,
+                                size: 20,
                               ),
-                              Padding(
-                                padding: const EdgeInsets.only(top: 4),
-                                child: Text(
-                                  _hardwareKeysActive ? 'Clicker\nReady' : 'No Clicker',
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 10,
-                                  ),
-                                ),
+                              const SizedBox(width: 8),
+                              // Source dropdown
+                              DropdownButton<CameraSource>(
+                                value: _selectedSource,
+                                dropdownColor: Colors.grey[900],
+                                underline: const SizedBox(),
+                                icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+                                style: const TextStyle(color: Colors.white, fontSize: 14),
+                                items: CameraSource.values.map((source) {
+                                  return DropdownMenuItem<CameraSource>(
+                                    value: source,
+                                    child: Text(source.label),
+                                  );
+                                }).toList(),
+                                onChanged: _isLoading ? null : (source) {
+                                  if (source != null) {
+                                    _switchSource(source);
+                                  }
+                                },
                               ),
                             ],
                           ),
