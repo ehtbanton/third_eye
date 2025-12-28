@@ -252,6 +252,12 @@ class MainActivity: FlutterActivity() {
                     result.success(true)
                 }
 
+                "updateNotification" -> {
+                    val text = call.argument<String>("text") ?: "Streaming"
+                    UdpStreamService.instance?.updateNotification(text)
+                    result.success(true)
+                }
+
                 else -> {
                     result.notImplemented()
                 }

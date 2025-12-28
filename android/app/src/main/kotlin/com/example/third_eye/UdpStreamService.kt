@@ -402,13 +402,16 @@ class UdpStreamService : Service() {
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
+            .setAutoCancel(false)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(pendingIntent)
             .addAction(android.R.drawable.ic_menu_view, "Describe", describePendingIntent)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
     }
 
-    private fun updateNotification(contentText: String) {
+    fun updateNotification(contentText: String) {
         val notification = buildNotification(contentText)
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(NOTIFICATION_ID, notification)

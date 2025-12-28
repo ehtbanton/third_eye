@@ -85,6 +85,13 @@ dependencies:
   media_kit_video: ^1.2.5
   media_kit_libs_video: ^1.0.5
 
+  # Maps and navigation
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+
+  # GPS location
+  geolocator: ^14.0.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

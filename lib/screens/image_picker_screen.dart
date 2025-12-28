@@ -13,7 +13,11 @@ import '../services/slp2_stream_service.dart';
 import '../services/hardware_key_service.dart';
 import '../services/face_recognition_service.dart';
 import '../services/foreground_service.dart';
+import '../services/location_service.dart';
+import '../services/azure_maps_service.dart';
 import '../widgets/h264_video_widget.dart';
+import '../models/route_info.dart';
+import 'map_screen.dart';
 
 class ImagePickerScreen extends StatefulWidget {
   const ImagePickerScreen({super.key});
@@ -41,8 +45,15 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   final HardwareKeyService _hardwareKeyService = HardwareKeyService();
   final FaceRecognitionService _faceRecognitionService = FaceRecognitionService();
   final ForegroundService _foregroundService = ForegroundService();
+  final LocationService _locationService = LocationService();
+  final AzureMapsService _azureMapsService = AzureMapsService();
   StreamSubscription<Map<String, dynamic>>? _foregroundTriggerSubscription;
   bool _backgroundServiceRunning = false;
+
+  // PageView for swipe navigation between map and camera
+  final PageController _pageController = PageController(initialPage: 1);
+  int _currentPage = 1; // 0 = Map, 1 = Camera
+  RouteInfo? _activeRoute;
 
   Uint8List? _currentFrame;
   Uint8List? _snapshotImage;
@@ -152,6 +163,18 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       // Initialize Gemini API and TTS
       final success = await _llamaService.initialize();
       await _ttsService.initialize();
+
+      // Initialize map services (async, non-blocking)
+      _azureMapsService.initialize().then((success) {
+        if (!success) {
+          print('WARNING: Azure Maps service not configured - add AZURE_MAPS_SUBSCRIPTION_KEY to .env');
+        }
+      });
+      _locationService.initialize().then((success) {
+        if (!success) {
+          print('WARNING: Location service failed to initialize');
+        }
+      });
 
       // Get available cameras
       print('Querying available cameras...');
@@ -1488,6 +1511,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     _llamaService.dispose();
     _ttsService.dispose();
     _faceRecognitionService.dispose();
+    _locationService.dispose();
+    _pageController.dispose();
     _cameraController?.dispose();
     _h264Controller?.stopStream();
     super.dispose();
@@ -1511,7 +1536,101 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                 ],
               ),
             )
-          : Column(
+          : Stack(
+              children: [
+                PageView(
+                  controller: _pageController,
+                  onPageChanged: (index) {
+                    setState(() => _currentPage = index);
+                  },
+                  children: [
+                    // Page 0: Map view
+                    MapScreen(
+                      locationService: _locationService,
+                      azureMapsService: _azureMapsService,
+                      activeRoute: _activeRoute,
+                      onRouteChanged: (route) {
+                        setState(() => _activeRoute = route);
+                      },
+                    ),
+                    // Page 1: Camera view
+                    _buildCameraView(),
+                  ],
+                ),
+                // Page indicator dots
+                Positioned(
+                  bottom: 8,
+                  left: 0,
+                  right: 0,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4),
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _currentPage == 0 ? Colors.white : Colors.white38,
+                        ),
+                      ),
+                      Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4),
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _currentPage == 1 ? Colors.white : Colors.white38,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                // Route indicator when on camera view
+                if (_currentPage == 1 && _activeRoute != null)
+                  Positioned(
+                    top: 40,
+                    left: 16,
+                    right: 16,
+                    child: GestureDetector(
+                      onTap: () {
+                        _pageController.animateToPage(
+                          0,
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOut,
+                        );
+                      },
+                      child: Card(
+                        color: Colors.blue.withOpacity(0.9),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12.0),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.navigation, color: Colors.white),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  _activeRoute!.summary,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                              const Icon(Icons.chevron_left, color: Colors.white),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Widget _buildCameraView() {
+    return Column(
               children: [
                 // Top half: Camera preview with capture button
                 Expanded(
@@ -1889,7 +2008,6 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                   ),
                 ),
               ],
-            ),
-    );
+            );
   }
 }

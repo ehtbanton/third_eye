@@ -128,6 +128,15 @@ class ForegroundService {
     }
   }
 
+  /// Update the notification text
+  Future<void> updateNotification(String text) async {
+    try {
+      await _channel.invokeMethod('updateNotification', {'text': text});
+    } catch (e) {
+      debugPrint('ForegroundService: Failed to update notification: $e');
+    }
+  }
+
   Map<String, dynamic> _emptyStats() {
     return {
       'isStreaming': false,
