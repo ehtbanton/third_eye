@@ -23,6 +23,7 @@ class MainActivity: FlutterActivity() {
     private val UDP_H264_CHANNEL = "com.example.third_eye/udp_h264"
     private val WIFI_NETWORK_CHANNEL = "com.example.third_eye/wifi_network"
     private val FOREGROUND_SERVICE_CHANNEL = "com.example.third_eye/foreground_service"
+    private val DEPTH_CHANNEL = "com.example.third_eye/depth"
 
     private var hardwareKeysChannel: MethodChannel? = null
     private var cellularHttpChannel: MethodChannel? = null
@@ -34,6 +35,7 @@ class MainActivity: FlutterActivity() {
     private var wifiNetworkChannel: MethodChannel? = null
     private var wifiNetworkManager: WifiNetworkManager? = null
     private var foregroundServiceChannel: MethodChannel? = null
+    private var depthChannel: MethodChannel? = null
 
     private val mainScope = CoroutineScope(Dispatchers.Main + Job())
 
@@ -269,6 +271,49 @@ class MainActivity: FlutterActivity() {
 
         Log.d("MainActivity", "Foreground service channel configured: $FOREGROUND_SERVICE_CHANNEL")
 
+        // Set up method channel for depth processing
+        depthChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEPTH_CHANNEL)
+
+        depthChannel!!.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "computeDepthFromPng" -> {
+                    val pngBytes = call.argument<ByteArray>("pngBytes")
+                    val assumeSbs = call.argument<Boolean>("assumeSbs") ?: true
+                    val numDisparities = call.argument<Int>("numDisparities") ?: 96
+                    val blockSize = call.argument<Int>("blockSize") ?: 15
+
+                    if (pngBytes == null) {
+                        result.error("INVALID_ARGS", "pngBytes is required", null)
+                        return@setMethodCallHandler
+                    }
+
+                    mainScope.launch(Dispatchers.Default) {
+                        try {
+                            val output = DepthProcessor.computeFromPng(
+                                pngBytes, assumeSbs, numDisparities, blockSize
+                            )
+                            withContext(Dispatchers.Main) {
+                                result.success(mapOf(
+                                    "depthPng" to output.depthPng,
+                                    "centerDisparity" to output.centerDisparity
+                                ))
+                            }
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                result.error("DEPTH_ERROR", e.message, null)
+                            }
+                        }
+                    }
+                }
+
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
+
+        Log.d("MainActivity", "Depth channel configured: $DEPTH_CHANNEL")
+
         // Register H264 video view factory for platform views
         h264VideoViewFactory = H264VideoViewFactory(flutterEngine.dartExecutor.binaryMessenger)
         flutterEngine.platformViewsController.registry.registerViewFactory(
@@ -484,6 +529,7 @@ class MainActivity: FlutterActivity() {
         wifiNetworkManager?.disconnect()
         wifiNetworkManager = null
         foregroundServiceChannel = null
+        depthChannel = null
         mainScope.cancel()
         super.onDestroy()
     }

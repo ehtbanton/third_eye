@@ -63,4 +63,6 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
     // AndroidX Media for MediaSession (background button handling)
     implementation 'androidx.media:media:1.7.0'
+    // OpenCV for depth map stereo matching
+    implementation 'org.opencv:opencv:4.9.0'
 }

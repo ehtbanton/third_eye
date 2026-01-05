@@ -16,8 +16,11 @@ import '../services/foreground_service.dart';
 import '../services/location_service.dart';
 import '../services/azure_maps_service.dart';
 import '../services/navigation_guidance_service.dart';
+import '../services/simulated_stereo_service.dart';
+import '../services/depth_service.dart';
 import '../widgets/h264_video_widget.dart';
 import '../models/route_info.dart';
+import '../models/depth_result.dart';
 import 'map_screen.dart';
 
 class ImagePickerScreen extends StatefulWidget {
@@ -31,6 +34,7 @@ class ImagePickerScreen extends StatefulWidget {
 enum CameraSource {
   slp2Udp('SLP2 UDP'),
   slp2Rtsp('SLP2 RTSP'),
+  simulatedStereo('Sim Stereo (SBS)'),
   esp32('ESP32-CAM'),
   phone('Phone');
 
@@ -48,9 +52,18 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   final ForegroundService _foregroundService = ForegroundService();
   final LocationService _locationService = LocationService();
   final AzureMapsService _azureMapsService = AzureMapsService();
+  final SimulatedStereoService _simStereoService = SimulatedStereoService();
+  final DepthService _depthService = DepthService();
   late final NavigationGuidanceService _navigationService;
   StreamSubscription<Map<String, dynamic>>? _foregroundTriggerSubscription;
   bool _backgroundServiceRunning = false;
+
+  // Simulated stereo and depth overlay
+  bool _isSimStereoConnected = false;
+  bool _depthOverlayEnabled = false;
+  Uint8List? _depthOverlayPng;
+  bool _depthComputing = false;
+  Timer? _depthTimer;
 
   // PageView for swipe navigation between map and camera
   final PageController _pageController = PageController(initialPage: 1);
@@ -256,13 +269,13 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     _hardwareKeyService.keyStream.listen((event) {
       print('=== AB Shutter 3 Button Press Detected ===');
       print('Button type: ${event.keyType}');
-      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera}');
+      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera}');
       print('Server available: $_serverAvailable');
       print('Is loading: $_isLoading');
       print('Dialog open: $_isDialogOpen');
 
       // Trigger capture on any key press if camera is available and no dialog is open
-      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)) {
+      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)) {
         // Button 1 (Volume Up): Take photo and describe image
         if (event.keyType == HardwareKeyType.volumeUp) {
           print('✓ Button 1 pressed - Taking photo and describing image');
@@ -294,12 +307,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       print('=== Background Service Trigger ===');
       print('Source: ${event['source']}');
       print('Timestamp: ${event['timestamp']}');
-      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp}');
+      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp}');
       print('Server available: $_serverAvailable');
       print('Is loading: $_isLoading');
 
       // Trigger capture if camera is available
-      if (!_isLoading && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)) {
+      if (!_isLoading && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)) {
         print('✓ Background trigger - Taking photo and describing image');
         _captureAndDescribe();
       } else {
@@ -677,12 +690,113 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       case CameraSource.slp2Rtsp:
         await _connectToSlp2();
         break;
+      case CameraSource.simulatedStereo:
+        await _connectToSimulatedStereo();
+        break;
       case CameraSource.esp32:
         await _connectToEsp32Wifi();
         break;
       case CameraSource.phone:
         await _initializePhoneCamera();
         break;
+    }
+  }
+
+  /// Connect to simulated stereo video source
+  Future<void> _connectToSimulatedStereo() async {
+    // Disconnect other sources
+    if (_isConnectedToWifi) {
+      await _wifiService.disconnect();
+      setState(() => _isConnectedToWifi = false);
+    }
+    if (_isConnectedToSlp2) {
+      await _slp2Service.disconnect();
+      setState(() => _isConnectedToSlp2 = false);
+    }
+    if (_useNativeUdp) {
+      await _h264Controller?.stopStream();
+      setState(() => _useNativeUdp = false);
+    }
+    if (_usePhoneCamera) {
+      await _cameraController?.dispose();
+      _cameraController = null;
+      setState(() => _usePhoneCamera = false);
+    }
+
+    final ok = await _simStereoService.connect();
+    if (!mounted) return;
+    setState(() {
+      _isSimStereoConnected = ok;
+    });
+
+    if (ok) {
+      _ttsService.speak('Simulated stereo connected');
+    } else {
+      _ttsService.speak('Failed to connect simulated stereo');
+    }
+  }
+
+  /// Toggle depth overlay on/off
+  void _toggleDepthOverlay() {
+    setState(() {
+      _depthOverlayEnabled = !_depthOverlayEnabled;
+      if (!_depthOverlayEnabled) {
+        _depthOverlayPng = null;
+      }
+    });
+
+    if (_depthOverlayEnabled) {
+      _startDepthLoop();
+    } else {
+      _stopDepthLoop();
+    }
+  }
+
+  /// Start the depth update loop
+  void _startDepthLoop() {
+    _depthTimer?.cancel();
+    _depthTimer = Timer.periodic(const Duration(milliseconds: 300), (_) {
+      _updateDepthOnce();
+    });
+  }
+
+  /// Stop the depth update loop
+  void _stopDepthLoop() {
+    _depthTimer?.cancel();
+    _depthTimer = null;
+  }
+
+  /// Update depth overlay once
+  Future<void> _updateDepthOnce() async {
+    if (!_depthOverlayEnabled || _depthComputing) return;
+
+    Uint8List? frame;
+
+    // Only do live depth from sources that can screenshot
+    if (_selectedSource == CameraSource.slp2Rtsp && _isConnectedToSlp2) {
+      frame = await _slp2Service.captureFrame();
+    } else if (_selectedSource == CameraSource.simulatedStereo && _isSimStereoConnected) {
+      frame = await _simStereoService.captureFrame();
+    } else {
+      return;
+    }
+
+    if (frame == null) return;
+
+    _depthComputing = true;
+    try {
+      final DepthResult res = await _depthService.computeDepthFromPng(
+        pngBytes: frame,
+        assumeSbs: true, // for sim + SLP2 we assume SBS
+      );
+      if (!mounted) return;
+      setState(() {
+        _depthOverlayPng = res.depthPng;
+      });
+    } catch (_) {
+      // Ignore transient errors; keep UI responsive.
+    } finally {
+      _depthComputing = false;
     }
   }
 
@@ -1007,6 +1121,34 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         return;
       }
     }
+    // Capture from Simulated Stereo (SBS)
+    else if (_isSimStereoConnected) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final frameBytes = await _simStereoService.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from simulated stereo');
+        }
+
+        _snapshotImage = frameBytes;
+
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/sim_stereo_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
     // Capture from Native UDP H264 stream (low latency)
     else if (_useNativeUdp && _h264Controller != null) {
       try {
@@ -1145,6 +1287,34 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         final tempDir = await getTemporaryDirectory();
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from Simulated Stereo (SBS)
+    else if (_isSimStereoConnected) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final frameBytes = await _simStereoService.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from simulated stereo');
+        }
+
+        _snapshotImage = frameBytes;
+
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/sim_stereo_snapshot_$timestamp.jpg');
         await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
@@ -1513,6 +1683,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     // Stop background service when app is closed
     _foregroundService.stopService();
     _foregroundTriggerSubscription?.cancel();
+    _depthTimer?.cancel();
+    _simStereoService.disconnect();
     _wifiService.dispose();
     _slp2Service.dispose();
     _hardwareKeyService.dispose();
@@ -1676,10 +1848,83 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                         )
                       // SLP2 RTSP stream preview (media_kit)
                       else if (_isConnectedToSlp2 && _slp2Service.videoController != null)
-                        Center(
-                          child: Video(
-                            controller: _slp2Service.videoController!,
-                          ),
+                        Stack(
+                          children: [
+                            Center(
+                              child: Video(
+                                controller: _slp2Service.videoController!,
+                              ),
+                            ),
+                            // Depth overlay
+                            if (_depthOverlayEnabled && _depthOverlayPng != null)
+                              Positioned.fill(
+                                child: Opacity(
+                                  opacity: 0.65,
+                                  child: Image.memory(
+                                    _depthOverlayPng!,
+                                    fit: BoxFit.cover,
+                                    gaplessPlayback: true,
+                                  ),
+                                ),
+                              ),
+                            // Center crosshair
+                            if (_depthOverlayEnabled)
+                              Center(
+                                child: Container(
+                                  width: 20,
+                                  height: 2,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            if (_depthOverlayEnabled)
+                              Center(
+                                child: Container(
+                                  width: 2,
+                                  height: 20,
+                                  color: Colors.white,
+                                ),
+                              ),
+                          ],
+                        )
+                      // Simulated stereo SBS video preview (media_kit)
+                      else if (_isSimStereoConnected && _simStereoService.videoController != null)
+                        Stack(
+                          children: [
+                            Center(
+                              child: Video(
+                                controller: _simStereoService.videoController!,
+                              ),
+                            ),
+                            // Depth overlay
+                            if (_depthOverlayEnabled && _depthOverlayPng != null)
+                              Positioned.fill(
+                                child: Opacity(
+                                  opacity: 0.65,
+                                  child: Image.memory(
+                                    _depthOverlayPng!,
+                                    fit: BoxFit.cover,
+                                    gaplessPlayback: true,
+                                  ),
+                                ),
+                              ),
+                            // Center crosshair
+                            if (_depthOverlayEnabled)
+                              Center(
+                                child: Container(
+                                  width: 20,
+                                  height: 2,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            if (_depthOverlayEnabled)
+                              Center(
+                                child: Container(
+                                  width: 2,
+                                  height: 20,
+                                  color: Colors.white,
+                                ),
+                              ),
+                          ],
                         )
                       // Native UDP H264 stream (low latency)
                       else if (_useNativeUdp)
@@ -1759,22 +2004,48 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                                   ? Icons.wifi
                                   : _isConnectedToSlp2
                                       ? Icons.videocam
-                                      : _useNativeUdp
-                                          ? Icons.stream
-                                          : _usePhoneCamera
-                                              ? Icons.camera
-                                              : Icons.wifi_off,
+                                      : _isSimStereoConnected
+                                          ? Icons.play_circle
+                                          : _useNativeUdp
+                                              ? Icons.stream
+                                              : _usePhoneCamera
+                                                  ? Icons.camera
+                                                  : Icons.wifi_off,
                               color: _isConnectedToWifi
                                   ? Colors.blue
                                   : _isConnectedToSlp2
                                       ? Colors.purple
-                                      : _useNativeUdp
-                                          ? Colors.cyan
-                                          : _usePhoneCamera
-                                              ? Colors.green
-                                              : Colors.grey,
+                                      : _isSimStereoConnected
+                                          ? Colors.orange
+                                          : _useNativeUdp
+                                              ? Colors.cyan
+                                              : _usePhoneCamera
+                                                  ? Colors.green
+                                                  : Colors.grey,
                               size: 32,
                             ),
+                            // Depth overlay toggle button
+                            if (_isConnectedToSlp2 || _isSimStereoConnected)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: GestureDetector(
+                                  onTap: _toggleDepthOverlay,
+                                  child: Container(
+                                    padding: const EdgeInsets.all(6),
+                                    decoration: BoxDecoration(
+                                      color: _depthOverlayEnabled
+                                          ? Colors.green.withOpacity(0.8)
+                                          : Colors.black.withOpacity(0.5),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Icon(
+                                      Icons.gradient,
+                                      color: _depthOverlayEnabled ? Colors.white : Colors.white70,
+                                      size: 28,
+                                    ),
+                                  ),
+                                ),
+                              ),
                           ],
                         ),
                       ),
@@ -1868,11 +2139,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                               // Describe button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_isSimStereoConnected && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndDescribe,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -1885,11 +2156,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                               // Extract text button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_isSimStereoConnected && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndExtractText,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -1902,11 +2173,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                               // Face recognition button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_isSimStereoConnected && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndRecognizeFace,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
