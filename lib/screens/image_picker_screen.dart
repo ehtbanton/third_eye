@@ -1,14 +1,27 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:camera/camera.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import '../services/llama_service.dart';
 import '../services/tts_service.dart';
 import '../services/esp32_wifi_service.dart';
+import '../services/slp2_stream_service.dart';
 import '../services/hardware_key_service.dart';
 import '../services/face_recognition_service.dart';
+import '../services/foreground_service.dart';
+import '../services/location_service.dart';
+import '../services/azure_maps_service.dart';
+import '../widgets/h264_video_widget.dart';
+import '../models/route_info.dart';
+import 'map_screen.dart';
+import '../services/simulated_stereo_service.dart';
+import '../services/depth_service.dart';
+import '../models/depth_result.dart';
+
 
 class ImagePickerScreen extends StatefulWidget {
   const ImagePickerScreen({super.key});
@@ -17,12 +30,44 @@ class ImagePickerScreen extends StatefulWidget {
   State<ImagePickerScreen> createState() => _ImagePickerScreenState();
 }
 
-class _ImagePickerScreenState extends State<ImagePickerScreen> {
+// Camera source options
+enum CameraSource {
+  slp2Udp('SLP2 UDP'),
+  slp2Rtsp('SLP2 RTSP'),
+  simulatedStereo('Sim Stereo (SBS)'),
+  esp32('ESP32-CAM'),
+  phone('Phone');
+
+  final String label;
+  const CameraSource(this.label);
+}
+
+
+class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindingObserver {
   final LlamaService _llamaService = LlamaService();
   final TtsService _ttsService = TtsService();
   final Esp32WifiService _wifiService = Esp32WifiService();
+  final Slp2StreamService _slp2Service = Slp2StreamService();
   final HardwareKeyService _hardwareKeyService = HardwareKeyService();
   final FaceRecognitionService _faceRecognitionService = FaceRecognitionService();
+  final ForegroundService _foregroundService = ForegroundService();
+  final LocationService _locationService = LocationService();
+  final AzureMapsService _azureMapsService = AzureMapsService();
+  final SimulatedStereoService _simStereoService = SimulatedStereoService();
+  final DepthService _depthService = DepthService();
+
+  bool _isSimStereoConnected = false;
+  bool _depthOverlayEnabled = false;
+  Uint8List? _depthOverlayPng;
+  bool _depthComputing = false;
+  Timer? _depthTimer;
+  StreamSubscription<Map<String, dynamic>>? _foregroundTriggerSubscription;
+  bool _backgroundServiceRunning = false;
+
+  // PageView for swipe navigation between map and camera
+  final PageController _pageController = PageController(initialPage: 1);
+  int _currentPage = 1; // 0 = Map, 1 = Camera
+  RouteInfo? _activeRoute;
 
   Uint8List? _currentFrame;
   Uint8List? _snapshotImage;
@@ -32,18 +77,56 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   bool _serverAvailable = false;
   bool _isInitializing = false;
   bool _isConnectedToWifi = false;
+  bool _isConnectedToSlp2 = false;
   bool _hardwareKeysActive = false;
   bool _isDialogOpen = false;
+
+  // Camera source selection
+  CameraSource _selectedSource = CameraSource.slp2Udp;
+
+  // LLM provider selection
+  LlmProvider _selectedLlmProvider = LlmProvider.gemini;
 
   // Phone camera fallback
   CameraController? _cameraController;
   bool _usePhoneCamera = false;
   List<CameraDescription>? _cameras;
 
+  // Native UDP H264 streaming
+  bool _useNativeUdp = false;
+  H264VideoController? _h264Controller;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initializeServices();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    print('App lifecycle state changed: $state');
+
+    if (state == AppLifecycleState.resumed) {
+      // App came back to foreground - reconnect video widget to service
+      _handleAppResumed();
+    }
+  }
+
+  /// Handle app returning to foreground - reconnect to service stream
+  Future<void> _handleAppResumed() async {
+    print('App resumed - reconnecting to stream');
+
+    // If we're using native UDP, reconnect the video widget to the service
+    if (_useNativeUdp && _h264Controller != null) {
+      print('Reconnecting video widget to service stream...');
+      // Stop current connection and reconnect (will use service data)
+      _h264Controller?.stopStream();
+      await Future.delayed(const Duration(milliseconds: 100));
+      await _h264Controller?.startStream(5000);
+      print('Video widget reconnected');
+    }
   }
 
   Future<void> _initializeServices() async {
@@ -62,9 +145,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         print('WARNING: Face recognition initialization failed: $e');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
+            const SnackBar(
               content: Text('Face recognition unavailable: Missing TFLite model. See assets/models/README.md'),
-              duration: const Duration(seconds: 8),
+              duration: Duration(seconds: 8),
               backgroundColor: Colors.orange,
             ),
           );
@@ -94,6 +177,18 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
       // Initialize Gemini API and TTS
       final success = await _llamaService.initialize();
       await _ttsService.initialize();
+
+      // Initialize map services (async, non-blocking)
+      _azureMapsService.initialize().then((success) {
+        if (!success) {
+          print('WARNING: Azure Maps service not configured - add AZURE_MAPS_SUBSCRIPTION_KEY to .env');
+        }
+      });
+      _locationService.initialize().then((success) {
+        if (!success) {
+          print('WARNING: Location service failed to initialize');
+        }
+      });
 
       // Get available cameras
       print('Querying available cameras...');
@@ -132,8 +227,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
           _ttsService.speak('Failed to initialize. Please enable mobile data.');
         }
 
-        // Show dialog to select camera source
-        _showCameraSourceDialog();
+        // Auto-start background service for persistent operation
+        await _startBackgroundService();
+
+        // Auto-connect to SLP2 UDP (default source)
+        _connectToSlp2Native();
       }
     } catch (e) {
       setState(() {
@@ -164,13 +262,13 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
     _hardwareKeyService.keyStream.listen((event) {
       print('=== AB Shutter 3 Button Press Detected ===');
       print('Button type: ${event.keyType}');
-      print('Camera available: ${_isConnectedToWifi || _usePhoneCamera}');
+      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera}');
       print('Server available: $_serverAvailable');
       print('Is loading: $_isLoading');
       print('Dialog open: $_isDialogOpen');
 
       // Trigger capture on any key press if camera is available and no dialog is open
-      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _usePhoneCamera)) {
+      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)) {
         // Button 1 (Volume Up): Take photo and describe image
         if (event.keyType == HardwareKeyType.volumeUp) {
           print('✓ Button 1 pressed - Taking photo and describing image');
@@ -190,6 +288,95 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         print('⚠ Button press ignored - conditions not met for capture');
       }
     });
+
+    // Also listen to triggers from the background foreground service
+    _setupForegroundServiceListener();
+  }
+
+  /// Setup listener for triggers from the background foreground service.
+  /// This enables scene description even when app is backgrounded or screen is off.
+  void _setupForegroundServiceListener() {
+    _foregroundTriggerSubscription = _foregroundService.triggerStream.listen((event) {
+      print('=== Background Service Trigger ===');
+      print('Source: ${event['source']}');
+      print('Timestamp: ${event['timestamp']}');
+      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp}');
+      print('Server available: $_serverAvailable');
+      print('Is loading: $_isLoading');
+
+      // Trigger capture if camera is available
+      if (!_isLoading && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)) {
+        print('✓ Background trigger - Taking photo and describing image');
+        _captureAndDescribe();
+      } else {
+        print('⚠ Background trigger ignored - conditions not met for capture');
+        _ttsService.speak('Cannot capture. Camera or server not ready.');
+      }
+    });
+  }
+
+  /// Start the background foreground service for persistent operation.
+  /// This keeps the UDP receiver alive and enables hardware button triggers
+  /// even when the app is minimized or the screen is off.
+  Future<void> _startBackgroundService() async {
+    if (_backgroundServiceRunning) {
+      print('Background service already running');
+      return;
+    }
+
+    // Request notification permission first (required on Android 13+)
+    if (!await _foregroundService.hasNotificationPermission()) {
+      await _foregroundService.requestNotificationPermission();
+    }
+
+    // Request battery optimization exemption for reliable background operation
+    await _foregroundService.requestBatteryOptimizationExemption();
+
+    // Start the service
+    final success = await _foregroundService.startService(port: 5000);
+    if (success) {
+      setState(() {
+        _backgroundServiceRunning = true;
+      });
+      print('Background service started successfully');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Background service started. Clicker works even with screen off.'),
+            duration: Duration(seconds: 3),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } else {
+      print('Failed to start background service');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to start background service'),
+            duration: Duration(seconds: 3),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Stop the background foreground service.
+  Future<void> _stopBackgroundService() async {
+    await _foregroundService.stopService();
+    setState(() {
+      _backgroundServiceRunning = false;
+    });
+    print('Background service stopped');
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Background service stopped'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   Future<void> _showCameraSourceDialog() async {
@@ -204,6 +391,14 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
             child: const Text('ESP32-CAM WiFi (192.168.4.1)'),
           ),
           TextButton(
+            onPressed: () => Navigator.pop(context, 'slp2'),
+            child: const Text('StereoPi SLP2 (RTSP)'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'slp2_native'),
+            child: const Text('SLP2 Native UDP (Low Latency)'),
+          ),
+          TextButton(
             onPressed: () => Navigator.pop(context, 'phone'),
             child: const Text('Phone Camera'),
           ),
@@ -213,25 +408,436 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
     if (choice == 'wifi') {
       await _connectToEsp32Wifi();
+    } else if (choice == 'slp2') {
+      await _connectToSlp2();
+    } else if (choice == 'slp2_native') {
+      await _connectToSlp2Native();
     } else if (choice == 'phone') {
       await _initializePhoneCamera();
     }
   }
 
+  Future<void> _connectToSlp2() async {
+    // Disconnect from other sources
+    if (_isConnectedToWifi) {
+      await _wifiService.disconnect();
+      setState(() => _isConnectedToWifi = false);
+    }
+    if (_useNativeUdp) {
+      await _h264Controller?.stopStream();
+      setState(() => _useNativeUdp = false);
+    }
+    if (_usePhoneCamera) {
+      await _cameraController?.dispose();
+      setState(() => _usePhoneCamera = false);
+    }
+
+    setState(() {
+      _isLoading = true;
+      _selectedSource = CameraSource.slp2Rtsp;
+    });
+
+    // Step 1: Auto-connect to SLP2 WiFi and setup cellular
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Connecting to SLP2 WiFi...'),
+        duration: Duration(seconds: 2),
+        backgroundColor: Colors.blue,
+      ),
+    );
+
+    final connectionResult = await _slp2Service.autoConnect();
+    final wifiConnected = connectionResult['wifi'] as bool;
+    final cellularReady = connectionResult['cellular'] as bool;
+
+    if (!wifiConnected) {
+      // WiFi connection failed - show manual connection dialog
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Auto-connect failed. Please connect to "${Slp2StreamService.defaultSsid}" WiFi manually.',
+            ),
+            duration: Duration(seconds: 5),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'WiFi connected! ${cellularReady ? "Internet via cellular ready." : "Warning: No cellular for internet."}',
+            ),
+            duration: const Duration(seconds: 2),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    }
+
+    // Step 2: Show IP dialog (pre-filled with default)
+    final ipController = TextEditingController(text: Slp2StreamService.defaultSlp2Ip);
+
+    final ip = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Connect to SLP2 (RTSP)'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('SLP2 IP address:'),
+            const SizedBox(height: 8),
+            TextField(
+              controller: ipController,
+              decoration: const InputDecoration(
+                hintText: '192.168.50.1',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.number,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              wifiConnected
+                  ? 'WiFi connected to ${Slp2StreamService.defaultSsid}'
+                  : 'Please connect to SLP2 WiFi manually',
+              style: TextStyle(
+                fontSize: 12,
+                color: wifiConnected ? Colors.green : Colors.orange,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              _slp2Service.disconnect();
+              Navigator.pop(context);
+            },
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, ipController.text),
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
+    );
+
+    if (ip == null || ip.isEmpty) {
+      setState(() {
+        _isLoading = false;
+      });
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Connecting to RTSP stream at $ip:554...'),
+        duration: const Duration(seconds: 3),
+        backgroundColor: Colors.blue,
+      ),
+    );
+
+    final success = await _slp2Service.connect(ip: ip);
+
+    if (success) {
+      // Listen to connection state changes
+      _slp2Service.connectionStateStream.listen((connected) {
+        if (mounted && !connected && _isConnectedToSlp2) {
+          setState(() {
+            _isConnectedToSlp2 = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('SLP2 stream disconnected'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      });
+
+      if (mounted) {
+        setState(() {
+          _isConnectedToSlp2 = true;
+          _isLoading = false;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Receiving SLP2 stream'),
+            backgroundColor: Colors.green,
+          ),
+        );
+
+        _ttsService.speak('SLP2 camera connected');
+      }
+    } else {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to connect to RTSP stream. Check network and SLP2 settings.'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 5),
+          ),
+        );
+
+        _ttsService.speak('Failed to connect to SLP2');
+      }
+    }
+  }
+
+  Future<void> _connectToSlp2Native() async {
+    // Disconnect from other sources
+    if (_isConnectedToWifi) {
+      await _wifiService.disconnect();
+      setState(() => _isConnectedToWifi = false);
+    }
+    if (_isConnectedToSlp2) {
+      await _slp2Service.disconnect();
+      setState(() => _isConnectedToSlp2 = false);
+    }
+    if (_usePhoneCamera) {
+      await _cameraController?.dispose();
+      setState(() => _usePhoneCamera = false);
+    }
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    // Step 1: Auto-connect to SLP2 WiFi and setup cellular
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Connecting to SLP2 WiFi...'),
+        duration: Duration(seconds: 2),
+        backgroundColor: Colors.blue,
+      ),
+    );
+
+    final connectionResult = await _slp2Service.autoConnect();
+    final wifiConnected = connectionResult['wifi'] as bool;
+    final cellularReady = connectionResult['cellular'] as bool;
+
+    if (!wifiConnected) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Auto-connect failed. Please connect to "${Slp2StreamService.defaultSsid}" WiFi manually.',
+            ),
+            duration: Duration(seconds: 5),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'WiFi connected! ${cellularReady ? "Internet via cellular ready." : "Warning: No cellular for internet."}',
+            ),
+            duration: const Duration(seconds: 2),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    }
+
+    setState(() {
+      _useNativeUdp = true;
+      _isLoading = false;
+      _selectedSource = CameraSource.slp2Udp;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Native UDP H264 stream started on port 5000.'),
+        duration: Duration(seconds: 3),
+        backgroundColor: Colors.green,
+      ),
+    );
+
+    _ttsService.speak('Native UDP streaming started');
+  }
+
+  /// Switch to a different camera source
+  Future<void> _switchSource(CameraSource source) async {
+    if (_selectedSource == source) return;
+
+    setState(() {
+      _selectedSource = source;
+    });
+
+    switch (source) {
+      case CameraSource.slp2Udp:
+        await _connectToSlp2Native();
+        break;
+      case CameraSource.slp2Rtsp:
+        await _connectToSlp2();
+        break;
+      case CameraSource.esp32:
+        await _connectToEsp32Wifi();
+        break;
+      case CameraSource.phone:
+        await _initializePhoneCamera();
+        break;
+      case CameraSource.simulatedStereo:
+        await _connectToSimulatedStereo();
+        break;
+    }
+  }
+
+  Future<void> _connectToSimulatedStereo() async {
+    // Disconnect other sources
+    if (_isConnectedToWifi) {
+      await _wifiService.disconnect();
+      setState(() => _isConnectedToWifi = false);
+    }
+    if (_isConnectedToSlp2) {
+      await _slp2Service.disconnect();
+      setState(() => _isConnectedToSlp2 = false);
+    }
+    if (_useNativeUdp) {
+      await _h264Controller?.stopStream();
+      setState(() => _useNativeUdp = false);
+    }
+    if (_usePhoneCamera) {
+      await _cameraController?.dispose();
+      _cameraController = null;
+      setState(() => _usePhoneCamera = false);
+    }
+
+    final ok = await _simStereoService.connect();
+    if (!mounted) return;
+    setState(() {
+      _isSimStereoConnected = ok;
+    });
+  }
+
+  void _toggleDepthOverlay() {
+    setState(() {
+      _depthOverlayEnabled = !_depthOverlayEnabled;
+      if (!_depthOverlayEnabled) {
+        _depthOverlayPng = null;
+      }
+    });
+
+    if (_depthOverlayEnabled) {
+      _startDepthLoop();
+    } else {
+      _stopDepthLoop();
+    }
+  }
+
+  void _startDepthLoop() {
+    _depthTimer?.cancel();
+    _depthTimer = Timer.periodic(const Duration(milliseconds: 300), (_) {
+      _updateDepthOnce();
+    });
+  }
+
+  void _stopDepthLoop() {
+    _depthTimer?.cancel();
+    _depthTimer = null;
+  }
+
+  Future<void> _updateDepthOnce() async {
+    if (!_depthOverlayEnabled || _depthComputing) return;
+
+    Uint8List? frame;
+
+    // Only do live depth from sources that can screenshot.
+    if (_selectedSource == CameraSource.slp2Rtsp && _isConnectedToSlp2) {
+      frame = await _slp2Service.captureFrame();
+    } else if (_selectedSource == CameraSource.simulatedStereo && _isSimStereoConnected) {
+      frame = await _simStereoService.captureFrame();
+    } else {
+      return;
+    }
+
+    if (frame == null) return;
+
+    _depthComputing = true;
+    try {
+      final DepthResult res = await _depthService.computeDepthFromPng(
+        pngBytes: frame,
+        assumeSbs: true, // for sim + SLP2 we assume SBS
+      );
+      if (!mounted) return;
+      setState(() {
+        _depthOverlayPng = res.depthPng;
+      });
+    } catch (_) {
+      // Ignore transient errors; keep UI responsive.
+    } finally {
+      _depthComputing = false;
+    }
+  }
+
+  /// Switch to a different LLM provider
+  Future<void> _switchLlmProvider(LlmProvider provider) async {
+    if (_selectedLlmProvider == provider) return;
+
+    setState(() {
+      _selectedLlmProvider = provider;
+    });
+
+    final success = await _llamaService.setProvider(provider);
+    if (!success && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to initialize ${_getLlmProviderLabel(provider)}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  String _getLlmProviderLabel(LlmProvider provider) {
+    switch (provider) {
+      case LlmProvider.azureOpenAI:
+        return 'Azure GPT-4o';
+      case LlmProvider.gemini:
+        return 'Gemini Flash';
+    }
+  }
+
   Future<void> _initializePhoneCamera() async {
+    // Disconnect from other sources
+    if (_isConnectedToWifi) {
+      await _wifiService.disconnect();
+      setState(() => _isConnectedToWifi = false);
+    }
+    if (_isConnectedToSlp2) {
+      await _slp2Service.disconnect();
+      setState(() => _isConnectedToSlp2 = false);
+    }
+    if (_useNativeUdp) {
+      await _h264Controller?.stopStream();
+      setState(() => _useNativeUdp = false);
+    }
+
     print('=== Phone Camera Initialization Started ===');
     print('Available cameras: ${_cameras?.length ?? 0}');
 
     if (_cameras == null || _cameras!.isEmpty) {
-      final errorMsg = 'No cameras found on device. Camera permission may be denied.';
+      const errorMsg = 'No cameras found on device. Camera permission may be denied.';
       print('ERROR: $errorMsg');
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
+          const SnackBar(
             content: Text(errorMsg),
             backgroundColor: Colors.red,
-            duration: const Duration(seconds: 5),
+            duration: Duration(seconds: 5),
           ),
         );
         _ttsService.speak('Camera not available. Please check permissions.');
@@ -271,6 +877,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         setState(() {
           _usePhoneCamera = true;
           _isLoading = false;
+          _selectedSource = CameraSource.phone;
         });
 
         ScaffoldMessenger.of(context).showSnackBar(
@@ -325,8 +932,23 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
   }
 
   Future<void> _connectToEsp32Wifi() async {
+    // Disconnect from other sources
+    if (_isConnectedToSlp2) {
+      await _slp2Service.disconnect();
+      setState(() => _isConnectedToSlp2 = false);
+    }
+    if (_useNativeUdp) {
+      await _h264Controller?.stopStream();
+      setState(() => _useNativeUdp = false);
+    }
+    if (_usePhoneCamera) {
+      await _cameraController?.dispose();
+      setState(() => _usePhoneCamera = false);
+    }
+
     setState(() {
       _isLoading = true;
+      _selectedSource = CameraSource.esp32;
     });
 
     // Inform user to connect to ESP32-CAM WiFi network first
@@ -428,7 +1050,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         return;
       }
     }
-    // Capture from WiFi camera
+    // Capture from WiFi camera (ESP32)
     else if (_isConnectedToWifi && _currentFrame != null) {
       try {
         setState(() {
@@ -442,6 +1064,93 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
         await tempFile.writeAsBytes(_currentFrame!);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from SLP2 (RTSP / media_kit)
+    else if (_selectedSource == CameraSource.slp2Rtsp && _isConnectedToSlp2) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final frameBytes = await _slp2Service.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from SLP2 RTSP');
+        }
+
+        _snapshotImage = frameBytes;
+
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/slp2_rtsp_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from Simulated Stereo (SBS)
+    else if (_selectedSource == CameraSource.simulatedStereo && _isSimStereoConnected) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final frameBytes = await _simStereoService.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from simulated stereo');
+        }
+
+        _snapshotImage = frameBytes;
+
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/sim_stereo_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+
+    // Capture from Native UDP H264 stream (low latency)
+    else if (_useNativeUdp && _h264Controller != null) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        // Capture frame from native H264 decoder
+        final frameBytes = await _h264Controller!.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from native UDP stream');
+        }
+
+        _snapshotImage = frameBytes;
+
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/native_udp_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
         setState(() {
@@ -516,7 +1225,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         return;
       }
     }
-    // Capture from WiFi camera
+    // Capture from WiFi camera (ESP32)
     else if (_isConnectedToWifi && _currentFrame != null) {
       try {
         setState(() {
@@ -530,6 +1239,93 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
         await tempFile.writeAsBytes(_currentFrame!);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from SLP2 (RTSP / media_kit)
+    else if (_selectedSource == CameraSource.slp2Rtsp && _isConnectedToSlp2) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final frameBytes = await _slp2Service.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from SLP2 RTSP');
+        }
+
+        _snapshotImage = frameBytes;
+
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/slp2_rtsp_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from Simulated Stereo (SBS)
+    else if (_selectedSource == CameraSource.simulatedStereo && _isSimStereoConnected) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final frameBytes = await _simStereoService.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from simulated stereo');
+        }
+
+        _snapshotImage = frameBytes;
+
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/sim_stereo_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+
+    // Capture from Native UDP H264 stream (low latency)
+    else if (_useNativeUdp && _h264Controller != null) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        // Capture frame from native H264 decoder
+        final frameBytes = await _h264Controller!.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from native UDP stream');
+        }
+
+        _snapshotImage = frameBytes;
+
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/native_udp_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
         setState(() {
@@ -619,7 +1415,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         return;
       }
     }
-    // Capture from WiFi camera
+    // Capture from WiFi camera (ESP32)
     else if (_isConnectedToWifi && _currentFrame != null) {
       try {
         setState(() {
@@ -633,6 +1429,93 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
         await tempFile.writeAsBytes(_currentFrame!);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from SLP2 (RTSP / media_kit)
+    else if (_selectedSource == CameraSource.slp2Rtsp && _isConnectedToSlp2) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final frameBytes = await _slp2Service.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from SLP2 RTSP');
+        }
+
+        _snapshotImage = frameBytes;
+
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/slp2_rtsp_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+    // Capture from Simulated Stereo (SBS)
+    else if (_selectedSource == CameraSource.simulatedStereo && _isSimStereoConnected) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        final frameBytes = await _simStereoService.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from simulated stereo');
+        }
+
+        _snapshotImage = frameBytes;
+
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/sim_stereo_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
+        imageFile = tempFile;
+      } catch (e) {
+        setState(() {
+          _description = 'Error: $e';
+          _isLoading = false;
+        });
+        return;
+      }
+    }
+
+    // Capture from Native UDP H264 stream (low latency)
+    else if (_useNativeUdp && _h264Controller != null) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _description = '';
+        });
+
+        // Capture frame from native H264 decoder
+        final frameBytes = await _h264Controller!.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from native UDP stream');
+        }
+
+        _snapshotImage = frameBytes;
+
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/native_udp_snapshot_$timestamp.jpg');
+        await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
         setState(() {
@@ -803,12 +1686,22 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    // Stop background service when app is closed
+    _stopDepthLoop();
+    _simStereoService.disconnect();
+    _foregroundService.stopService();
+    _foregroundTriggerSubscription?.cancel();
     _wifiService.dispose();
+    _slp2Service.dispose();
     _hardwareKeyService.dispose();
     _llamaService.dispose();
     _ttsService.dispose();
     _faceRecognitionService.dispose();
+    _locationService.dispose();
+    _pageController.dispose();
     _cameraController?.dispose();
+    _h264Controller?.stopStream();
     super.dispose();
   }
 
@@ -830,7 +1723,101 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                 ],
               ),
             )
-          : Column(
+          : Stack(
+              children: [
+                PageView(
+                  controller: _pageController,
+                  onPageChanged: (index) {
+                    setState(() => _currentPage = index);
+                  },
+                  children: [
+                    // Page 0: Map view
+                    MapScreen(
+                      locationService: _locationService,
+                      azureMapsService: _azureMapsService,
+                      activeRoute: _activeRoute,
+                      onRouteChanged: (route) {
+                        setState(() => _activeRoute = route);
+                      },
+                    ),
+                    // Page 1: Camera view
+                    _buildCameraView(),
+                  ],
+                ),
+                // Page indicator dots
+                Positioned(
+                  bottom: 8,
+                  left: 0,
+                  right: 0,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4),
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _currentPage == 0 ? Colors.white : Colors.white38,
+                        ),
+                      ),
+                      Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4),
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _currentPage == 1 ? Colors.white : Colors.white38,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                // Route indicator when on camera view
+                if (_currentPage == 1 && _activeRoute != null)
+                  Positioned(
+                    top: 40,
+                    left: 16,
+                    right: 16,
+                    child: GestureDetector(
+                      onTap: () {
+                        _pageController.animateToPage(
+                          0,
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOut,
+                        );
+                      },
+                      child: Card(
+                        color: Colors.blue.withOpacity(0.9),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12.0),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.navigation, color: Colors.white),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  _activeRoute!.summary,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                              const Icon(Icons.chevron_left, color: Colors.white),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Widget _buildCameraView() {
+    return Column(
               children: [
                 // Top half: Camera preview with capture button
                 Expanded(
@@ -861,6 +1848,81 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               SizedBox(height: 16),
                               Text(
                                 'Waiting for ESP32-CAM WiFi stream...',
+                                style: TextStyle(color: Colors.white),
+                              ),
+                            ],
+                          ),
+                        )
+                      // SLP2 RTSP stream preview (media_kit)
+                      else if (_isConnectedToSlp2 && _slp2Service.videoController != null)
+                        Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Center(
+                              child: Video(controller: _slp2Service.videoController!),
+                            ),
+                            if (_depthOverlayEnabled && _depthOverlayPng != null)
+                              Opacity(
+                                opacity: 0.65,
+                                child: Image.memory(_depthOverlayPng!, fit: BoxFit.cover),
+                              ),
+                            if (_depthOverlayEnabled)
+                              Align(
+                                alignment: Alignment.center,
+                                child: Container(width: 2, color: Colors.white.withOpacity(0.6)),
+                              ),
+                          ],
+                        )
+                      else if (_selectedSource == CameraSource.simulatedStereo && _isSimStereoConnected && _simStereoService.videoController != null)
+                        Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Center(
+                              child: Video(controller: _simStereoService.videoController!),
+                            ),
+                            if (_depthOverlayEnabled && _depthOverlayPng != null)
+                              Opacity(
+                                opacity: 0.65,
+                                child: Image.memory(_depthOverlayPng!, fit: BoxFit.cover),
+                              ),
+                            if (_depthOverlayEnabled)
+                              Align(
+                                alignment: Alignment.center,
+                                child: Container(width: 2, color: Colors.white.withOpacity(0.6)),
+                              ),
+                          ],
+                        )
+                      else if (_selectedSource == CameraSource.simulatedStereo && !_isSimStereoConnected)
+                        const Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              CircularProgressIndicator(color: Colors.white),
+                              SizedBox(height: 16),
+                              Text('Loading simulated stereo video...', style: TextStyle(color: Colors.white)),
+                            ],
+                          ),
+                        )
+
+
+                      // Native UDP H264 stream (low latency)
+                      else if (_useNativeUdp)
+                        H264VideoWidget(
+                          port: 5000,
+                          autoStart: true,
+                          onControllerCreated: (controller) {
+                            _h264Controller = controller;
+                          },
+                        )
+                      else if (_isConnectedToSlp2)
+                        const Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              CircularProgressIndicator(color: Colors.white),
+                              SizedBox(height: 16),
+                              Text(
+                                'Connecting to SLP2 UDP stream...',
                                 style: TextStyle(color: Colors.white),
                               ),
                             ],
@@ -916,53 +1978,116 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               size: 32,
                             ),
                             const SizedBox(height: 8),
+                            IconButton(
+                              onPressed: (_isConnectedToSlp2 || _isSimStereoConnected) ? _toggleDepthOverlay : null,
+                              icon: Icon(
+                                Icons.gradient,
+                                color: _depthOverlayEnabled ? Colors.green : Colors.white70,
+                              ),
+                              tooltip: 'Toggle depth overlay',
+                            ),
+
+                            const SizedBox(height: 8),
+                            
                             Icon(
                               _isConnectedToWifi
                                   ? Icons.wifi
-                                  : _usePhoneCamera
-                                      ? Icons.camera
-                                      : Icons.wifi_off,
+                                  : _isConnectedToSlp2
+                                      ? Icons.videocam
+                                      : _useNativeUdp
+                                          ? Icons.stream
+                                          : _usePhoneCamera
+                                              ? Icons.camera
+                                              : Icons.wifi_off,
                               color: _isConnectedToWifi
                                   ? Colors.blue
-                                  : _usePhoneCamera
-                                      ? Colors.green
-                                      : Colors.grey,
+                                  : _isConnectedToSlp2
+                                      ? Colors.purple
+                                      : _useNativeUdp
+                                          ? Colors.cyan
+                                          : _usePhoneCamera
+                                              ? Colors.green
+                                              : Colors.grey,
                               size: 32,
                             ),
                           ],
                         ),
                       ),
 
-                      // Hardware key status indicator (top left)
+                      // Source and LLM selection dropdowns (top left)
                       Positioned(
                         top: 40,
                         left: 16,
-                        child: Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.5),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Column(
-                            children: [
-                              Icon(
-                                _hardwareKeysActive ? Icons.keyboard : Icons.keyboard_outlined,
-                                color: _hardwareKeysActive ? Colors.green : Colors.grey,
-                                size: 32,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Camera source dropdown
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.7),
+                                borderRadius: BorderRadius.circular(8),
                               ),
-                              Padding(
-                                padding: const EdgeInsets.only(top: 4),
-                                child: Text(
-                                  _hardwareKeysActive ? 'Clicker\nReady' : 'No Clicker',
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 10,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  // Hardware key status icon
+                                  Icon(
+                                    _hardwareKeysActive ? Icons.keyboard : Icons.keyboard_outlined,
+                                    color: _hardwareKeysActive ? Colors.green : Colors.grey,
+                                    size: 20,
                                   ),
-                                ),
+                                  const SizedBox(width: 8),
+                                  // Source dropdown
+                                  DropdownButton<CameraSource>(
+                                    value: _selectedSource,
+                                    dropdownColor: Colors.grey[900],
+                                    underline: const SizedBox(),
+                                    icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+                                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                                    items: CameraSource.values.map((source) {
+                                      return DropdownMenuItem<CameraSource>(
+                                        value: source,
+                                        child: Text(source.label),
+                                      );
+                                    }).toList(),
+                                    onChanged: _isLoading ? null : (source) {
+                                      if (source != null) {
+                                        _switchSource(source);
+                                      }
+                                    },
+                                  ),
+                                ],
                               ),
-                            ],
-                          ),
+                            ),
+                            const SizedBox(height: 8),
+                            // LLM provider dropdown
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.7),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: DropdownButton<LlmProvider>(
+                                value: _selectedLlmProvider,
+                                dropdownColor: Colors.grey[900],
+                                underline: const SizedBox(),
+                                icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+                                style: const TextStyle(color: Colors.white, fontSize: 14),
+                                items: LlmProvider.values.map((provider) {
+                                  return DropdownMenuItem<LlmProvider>(
+                                    value: provider,
+                                    child: Text(_getLlmProviderLabel(provider)),
+                                  );
+                                }).toList(),
+                                onChanged: _isLoading ? null : (provider) {
+                                  if (provider != null) {
+                                    _switchLlmProvider(provider);
+                                  }
+                                },
+                              ),
+                            ),
+                          ],
                         ),
                       ),
 
@@ -978,11 +2103,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Describe button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_isSimStereoConnected && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndDescribe,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _usePhoneCamera)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -995,11 +2120,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Extract text button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_isSimStereoConnected && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndExtractText,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _usePhoneCamera)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -1012,11 +2137,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                               // Face recognition button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_usePhoneCamera)
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_isSimStereoConnected && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndRecognizeFace,
                                 backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _usePhoneCamera)
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -1126,7 +2251,6 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> {
                   ),
                 ),
               ],
-            ),
-    );
+            );
   }
 }
