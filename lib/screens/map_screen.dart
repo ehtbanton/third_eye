@@ -67,7 +67,7 @@ class _MapScreenState extends State<MapScreen> {
                 child: Text(
                   'Tap on map to set destination',
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.9),
+                    color: Colors.white.withValues(alpha: 0.9),
                     fontSize: 12,
                   ),
                   textAlign: TextAlign.center,
