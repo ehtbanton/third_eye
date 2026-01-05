@@ -1,4 +1,5 @@
 import 'package:latlong2/latlong.dart';
+import 'navigation_checkpoint.dart';
 
 class RouteInfo {
   final List<LatLng> routePoints;
@@ -7,6 +8,7 @@ class RouteInfo {
   final String summary;
   final DateTime timestamp;
   final LatLng destination;
+  final List<NavigationCheckpoint> checkpoints;
 
   RouteInfo({
     required this.routePoints,
@@ -15,6 +17,7 @@ class RouteInfo {
     required this.summary,
     required this.timestamp,
     required this.destination,
+    this.checkpoints = const [],
   });
 
   factory RouteInfo.fromAzureMapsResponse(Map<String, dynamic> json) {
@@ -26,6 +29,7 @@ class RouteInfo {
     final route = routes[0] as Map<String, dynamic>;
     final summary = route['summary'] as Map<String, dynamic>?;
     final legs = route['legs'] as List<dynamic>?;
+    final guidance = route['guidance'] as Map<String, dynamic>?;
 
     // Extract route points from legs
     final List<LatLng> points = [];
@@ -51,6 +55,21 @@ class RouteInfo {
     final durationMinutes = durationSeconds / 60;
     final summaryText = '${distanceKm.toStringAsFixed(1)} km, ${durationMinutes.toStringAsFixed(0)} min';
 
+    // Parse guidance instructions from route-level guidance
+    final List<NavigationCheckpoint> checkpoints = [];
+    final instructions = guidance?['instructions'] as List<dynamic>?;
+    if (instructions != null) {
+      int checkpointIndex = 0;
+      for (final instruction in instructions) {
+        if (instruction != null && instruction is Map<String, dynamic>) {
+          checkpoints.add(NavigationCheckpoint.fromAzureMapsInstruction(
+            instruction,
+            checkpointIndex++,
+          ));
+        }
+      }
+    }
+
     return RouteInfo(
       routePoints: points,
       distanceMeters: distanceMeters,
@@ -58,6 +77,7 @@ class RouteInfo {
       summary: summaryText,
       timestamp: DateTime.now(),
       destination: points.isNotEmpty ? points.last : const LatLng(0, 0),
+      checkpoints: checkpoints,
     );
   }
 

@@ -51,6 +51,7 @@ class AzureMapsService {
         '&travelMode=pedestrian'
         '&routeType=shortest'
         '&avoid=motorways'
+        '&instructionsType=text'
       );
       print('Route URL: $url');
 

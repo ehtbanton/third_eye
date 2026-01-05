@@ -206,6 +206,57 @@ class _AzureMapsWidgetState extends State<AzureMapsWidget> {
                 ],
               ),
 
+            // Checkpoint activation radius circles (20m)
+            if (_currentRoute != null && _currentRoute!.checkpoints.isNotEmpty)
+              CircleLayer(
+                circles: _currentRoute!.checkpoints
+                    .where((checkpoint) =>
+                        checkpoint.location.latitude != 0 ||
+                        checkpoint.location.longitude != 0)
+                    .map((checkpoint) => CircleMarker(
+                          point: checkpoint.location,
+                          radius: 20, // 20 meters
+                          useRadiusInMeter: true,
+                          color: Colors.orange.withValues(alpha: 0.15),
+                          borderColor: Colors.orange.withValues(alpha: 0.5),
+                          borderStrokeWidth: 1.5,
+                        ))
+                    .toList(),
+              ),
+
+            // Checkpoint markers
+            if (_currentRoute != null && _currentRoute!.checkpoints.isNotEmpty)
+              MarkerLayer(
+                markers: _currentRoute!.checkpoints.map((checkpoint) {
+                  // Skip if location is at origin (0,0)
+                  if (checkpoint.location.latitude == 0 && checkpoint.location.longitude == 0) {
+                    return null;
+                  }
+                  return Marker(
+                    point: checkpoint.location,
+                    width: 24,
+                    height: 24,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.orange,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 2),
+                      ),
+                      child: Center(
+                        child: Text(
+                          '${checkpoint.index + 1}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }).whereType<Marker>().toList(),
+              ),
+
             // Current location marker
             if (_currentLocation != null)
               MarkerLayer(

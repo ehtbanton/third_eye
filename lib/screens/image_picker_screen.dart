@@ -15,6 +15,7 @@ import '../services/face_recognition_service.dart';
 import '../services/foreground_service.dart';
 import '../services/location_service.dart';
 import '../services/azure_maps_service.dart';
+import '../services/navigation_guidance_service.dart';
 import '../widgets/h264_video_widget.dart';
 import '../models/route_info.dart';
 import 'map_screen.dart';
@@ -47,6 +48,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   final ForegroundService _foregroundService = ForegroundService();
   final LocationService _locationService = LocationService();
   final AzureMapsService _azureMapsService = AzureMapsService();
+  late final NavigationGuidanceService _navigationService;
   StreamSubscription<Map<String, dynamic>>? _foregroundTriggerSubscription;
   bool _backgroundServiceRunning = false;
 
@@ -163,6 +165,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       // Initialize Gemini API and TTS
       final success = await _llamaService.initialize();
       await _ttsService.initialize();
+
+      // Initialize navigation guidance service
+      _navigationService = NavigationGuidanceService(
+        ttsService: _ttsService,
+        locationService: _locationService,
+      );
 
       // Initialize map services (async, non-blocking)
       _azureMapsService.initialize().then((success) {
@@ -1511,6 +1519,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     _llamaService.dispose();
     _ttsService.dispose();
     _faceRecognitionService.dispose();
+    _navigationService.dispose();
     _locationService.dispose();
     _pageController.dispose();
     _cameraController?.dispose();
@@ -1548,6 +1557,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                     MapScreen(
                       locationService: _locationService,
                       azureMapsService: _azureMapsService,
+                      navigationService: _navigationService,
                       activeRoute: _activeRoute,
                       onRouteChanged: (route) {
                         setState(() => _activeRoute = route);
