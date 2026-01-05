@@ -48,8 +48,11 @@ class AzureMapsService {
         '?api-version=1.0'
         '&subscription-key=$_subscriptionKey'
         '&query=$query'
+        '&travelMode=pedestrian'
         '&routeType=shortest'
+        '&avoid=motorways'
       );
+      print('Route URL: $url');
 
       print('Requesting route from Azure Maps...');
       final response = await http.get(url).timeout(

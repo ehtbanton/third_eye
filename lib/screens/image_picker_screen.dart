@@ -1586,44 +1586,42 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                     ],
                   ),
                 ),
-                // Route indicator when on camera view
-                if (_currentPage == 1 && _activeRoute != null)
-                  Positioned(
-                    top: 40,
-                    left: 16,
-                    right: 16,
-                    child: GestureDetector(
-                      onTap: () {
-                        _pageController.animateToPage(
-                          0,
-                          duration: const Duration(milliseconds: 300),
-                          curve: Curves.easeInOut,
-                        );
-                      },
-                      child: Card(
-                        color: Colors.blue.withOpacity(0.9),
-                        child: Padding(
-                          padding: const EdgeInsets.all(12.0),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.navigation, color: Colors.white),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Text(
-                                  _activeRoute!.summary,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                              const Icon(Icons.chevron_left, color: Colors.white),
-                            ],
+                // Swipe handle on right edge (map view) or left edge (camera view)
+                Positioned(
+                  right: _currentPage == 0 ? 0 : null,
+                  left: _currentPage == 1 ? 0 : null,
+                  top: 0,
+                  bottom: 0,
+                  child: GestureDetector(
+                    onHorizontalDragEnd: (details) {
+                      if (_currentPage == 0 && (details.primaryVelocity ?? 0) > 0) {
+                        // On map, swiped right -> go to camera
+                        _pageController.animateToPage(1,
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeInOut);
+                      } else if (_currentPage == 1 && (details.primaryVelocity ?? 0) < 0) {
+                        // On camera, swiped left -> go to map
+                        _pageController.animateToPage(0,
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeInOut);
+                      }
+                    },
+                    child: Container(
+                      width: 24,
+                      color: Colors.transparent,
+                      child: Center(
+                        child: Container(
+                          width: 4,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: Colors.white54,
+                            borderRadius: BorderRadius.circular(2),
                           ),
                         ),
                       ),
                     ),
                   ),
+                ),
               ],
             ),
     );
