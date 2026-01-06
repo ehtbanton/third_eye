@@ -13,6 +13,9 @@ import '../services/slp2_stream_service.dart';
 import '../services/hardware_key_service.dart';
 import '../services/face_recognition_service.dart';
 import '../services/foreground_service.dart';
+<<<<<<< HEAD
+import '../widgets/h264_video_widget.dart';
+=======
 import '../services/location_service.dart';
 import '../services/azure_maps_service.dart';
 import '../widgets/h264_video_widget.dart';
@@ -22,6 +25,7 @@ import '../services/simulated_stereo_service.dart';
 import '../services/depth_service.dart';
 import '../models/depth_result.dart';
 
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
 
 class ImagePickerScreen extends StatefulWidget {
   const ImagePickerScreen({super.key});
@@ -34,7 +38,10 @@ class ImagePickerScreen extends StatefulWidget {
 enum CameraSource {
   slp2Udp('SLP2 UDP'),
   slp2Rtsp('SLP2 RTSP'),
+<<<<<<< HEAD
+=======
   simulatedStereo('Sim Stereo (SBS)'),
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
   esp32('ESP32-CAM'),
   phone('Phone');
 
@@ -42,7 +49,10 @@ enum CameraSource {
   const CameraSource(this.label);
 }
 
+<<<<<<< HEAD
+=======
 
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
 class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindingObserver {
   final LlamaService _llamaService = LlamaService();
   final TtsService _ttsService = TtsService();
@@ -51,6 +61,10 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   final HardwareKeyService _hardwareKeyService = HardwareKeyService();
   final FaceRecognitionService _faceRecognitionService = FaceRecognitionService();
   final ForegroundService _foregroundService = ForegroundService();
+<<<<<<< HEAD
+  StreamSubscription<Map<String, dynamic>>? _foregroundTriggerSubscription;
+  bool _backgroundServiceRunning = false;
+=======
   final LocationService _locationService = LocationService();
   final AzureMapsService _azureMapsService = AzureMapsService();
   final SimulatedStereoService _simStereoService = SimulatedStereoService();
@@ -68,6 +82,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   final PageController _pageController = PageController(initialPage: 1);
   int _currentPage = 1; // 0 = Map, 1 = Camera
   RouteInfo? _activeRoute;
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
 
   Uint8List? _currentFrame;
   Uint8List? _snapshotImage;
@@ -268,7 +283,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       print('Dialog open: $_isDialogOpen');
 
       // Trigger capture on any key press if camera is available and no dialog is open
+<<<<<<< HEAD
+      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)) {
+=======
       if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)) {
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
         // Button 1 (Volume Up): Take photo and describe image
         if (event.keyType == HardwareKeyType.volumeUp) {
           print('✓ Button 1 pressed - Taking photo and describing image');
@@ -300,12 +319,20 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       print('=== Background Service Trigger ===');
       print('Source: ${event['source']}');
       print('Timestamp: ${event['timestamp']}');
+<<<<<<< HEAD
+      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp}');
+=======
       print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp}');
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
       print('Server available: $_serverAvailable');
       print('Is loading: $_isLoading');
 
       // Trigger capture if camera is available
+<<<<<<< HEAD
+      if (!_isLoading && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)) {
+=======
       if (!_isLoading && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)) {
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
         print('✓ Background trigger - Taking photo and describing image');
         _captureAndDescribe();
       } else {
@@ -454,11 +481,19 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       // WiFi connection failed - show manual connection dialog
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
+<<<<<<< HEAD
+          SnackBar(
+            content: Text(
+              'Auto-connect failed. Please connect to "${Slp2StreamService.defaultSsid}" WiFi manually.',
+            ),
+            duration: const Duration(seconds: 5),
+=======
           const SnackBar(
             content: Text(
               'Auto-connect failed. Please connect to "${Slp2StreamService.defaultSsid}" WiFi manually.',
             ),
             duration: Duration(seconds: 5),
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
             backgroundColor: Colors.orange,
           ),
         );
@@ -628,11 +663,19 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     if (!wifiConnected) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
+<<<<<<< HEAD
+          SnackBar(
+            content: Text(
+              'Auto-connect failed. Please connect to "${Slp2StreamService.defaultSsid}" WiFi manually.',
+            ),
+            duration: const Duration(seconds: 5),
+=======
           const SnackBar(
             content: Text(
               'Auto-connect failed. Please connect to "${Slp2StreamService.defaultSsid}" WiFi manually.',
             ),
             duration: Duration(seconds: 5),
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
             backgroundColor: Colors.orange,
           ),
         );
@@ -689,6 +732,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       case CameraSource.phone:
         await _initializePhoneCamera();
         break;
+<<<<<<< HEAD
+=======
       case CameraSource.simulatedStereo:
         await _connectToSimulatedStereo();
         break;
@@ -779,6 +824,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       // Ignore transient errors; keep UI responsive.
     } finally {
       _depthComputing = false;
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
     }
   }
 
@@ -1073,24 +1119,43 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         return;
       }
     }
+<<<<<<< HEAD
+    // Capture from SLP2 (UDP H264)
+    else if (_isConnectedToSlp2) {
+=======
     // Capture from SLP2 (RTSP / media_kit)
     else if (_selectedSource == CameraSource.slp2Rtsp && _isConnectedToSlp2) {
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
       try {
         setState(() {
           _isLoading = true;
           _description = '';
         });
 
+<<<<<<< HEAD
+        // Capture frame from VLC player
+        final frameBytes = await _slp2Service.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from SLP2');
+=======
         final frameBytes = await _slp2Service.captureFrame();
         if (frameBytes == null) {
           throw Exception('Failed to capture frame from SLP2 RTSP');
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
         }
 
         _snapshotImage = frameBytes;
 
+<<<<<<< HEAD
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
+=======
         final tempDir = await getTemporaryDirectory();
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/slp2_rtsp_snapshot_$timestamp.jpg');
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
         await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
@@ -1101,6 +1166,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         return;
       }
     }
+<<<<<<< HEAD
+=======
     // Capture from Simulated Stereo (SBS)
     else if (_selectedSource == CameraSource.simulatedStereo && _isSimStereoConnected) {
       try {
@@ -1130,6 +1197,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       }
     }
 
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
     // Capture from Native UDP H264 stream (low latency)
     else if (_useNativeUdp && _h264Controller != null) {
       try {
@@ -1177,7 +1245,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       });
 
       // Get description from LLM
-      final response = await _llamaService.describeImage(imageFile.path);
+      final response = await _llamaService.describeImage(imageFile!.path);
 
       setState(() {
         if (response.success) {
@@ -1248,24 +1316,43 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         return;
       }
     }
+<<<<<<< HEAD
+    // Capture from SLP2 (UDP H264)
+    else if (_isConnectedToSlp2) {
+=======
     // Capture from SLP2 (RTSP / media_kit)
     else if (_selectedSource == CameraSource.slp2Rtsp && _isConnectedToSlp2) {
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
       try {
         setState(() {
           _isLoading = true;
           _description = '';
         });
 
+<<<<<<< HEAD
+        // Capture frame from VLC player
+        final frameBytes = await _slp2Service.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from SLP2');
+=======
         final frameBytes = await _slp2Service.captureFrame();
         if (frameBytes == null) {
           throw Exception('Failed to capture frame from SLP2 RTSP');
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
         }
 
         _snapshotImage = frameBytes;
 
+<<<<<<< HEAD
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
+=======
         final tempDir = await getTemporaryDirectory();
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/slp2_rtsp_snapshot_$timestamp.jpg');
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
         await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
@@ -1276,6 +1363,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         return;
       }
     }
+<<<<<<< HEAD
+=======
     // Capture from Simulated Stereo (SBS)
     else if (_selectedSource == CameraSource.simulatedStereo && _isSimStereoConnected) {
       try {
@@ -1305,6 +1394,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       }
     }
 
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
     // Capture from Native UDP H264 stream (low latency)
     else if (_useNativeUdp && _h264Controller != null) {
       try {
@@ -1352,7 +1442,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       });
 
       // Extract text from LLM
-      final response = await _llamaService.extractText(imageFile.path);
+      final response = await _llamaService.extractText(imageFile!.path);
 
       setState(() {
         if (response.success) {
@@ -1438,24 +1528,43 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         return;
       }
     }
+<<<<<<< HEAD
+    // Capture from SLP2 (UDP H264)
+    else if (_isConnectedToSlp2) {
+=======
     // Capture from SLP2 (RTSP / media_kit)
     else if (_selectedSource == CameraSource.slp2Rtsp && _isConnectedToSlp2) {
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
       try {
         setState(() {
           _isLoading = true;
           _description = '';
         });
 
+<<<<<<< HEAD
+        // Capture frame from VLC player
+        final frameBytes = await _slp2Service.captureFrame();
+        if (frameBytes == null) {
+          throw Exception('Failed to capture frame from SLP2');
+=======
         final frameBytes = await _slp2Service.captureFrame();
         if (frameBytes == null) {
           throw Exception('Failed to capture frame from SLP2 RTSP');
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
         }
 
         _snapshotImage = frameBytes;
 
+<<<<<<< HEAD
+        // Save to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
+=======
         final tempDir = await getTemporaryDirectory();
         final timestamp = DateTime.now().millisecondsSinceEpoch;
         final tempFile = File('${tempDir.path}/slp2_rtsp_snapshot_$timestamp.jpg');
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
         await tempFile.writeAsBytes(frameBytes);
         imageFile = tempFile;
       } catch (e) {
@@ -1466,6 +1575,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         return;
       }
     }
+<<<<<<< HEAD
+=======
     // Capture from Simulated Stereo (SBS)
     else if (_selectedSource == CameraSource.simulatedStereo && _isSimStereoConnected) {
       try {
@@ -1495,6 +1606,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       }
     }
 
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
     // Capture from Native UDP H264 stream (low latency)
     else if (_useNativeUdp && _h264Controller != null) {
       try {
@@ -1542,7 +1654,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       });
 
       // Use new ML-based face recognition
-      final result = await _faceRecognitionService.recognizeFace(imageFile);
+      final result = await _faceRecognitionService.recognizeFace(imageFile!);
 
       if (!mounted) return;
 
@@ -1688,8 +1800,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     // Stop background service when app is closed
+<<<<<<< HEAD
+=======
     _stopDepthLoop();
     _simStereoService.disconnect();
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
     _foregroundService.stopService();
     _foregroundTriggerSubscription?.cancel();
     _wifiService.dispose();
@@ -1855,43 +1970,33 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                         )
                       // SLP2 RTSP stream preview (media_kit)
                       else if (_isConnectedToSlp2 && _slp2Service.videoController != null)
-                        Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            Center(
-                              child: Video(controller: _slp2Service.videoController!),
-                            ),
-                            if (_depthOverlayEnabled && _depthOverlayPng != null)
-                              Opacity(
-                                opacity: 0.65,
-                                child: Image.memory(_depthOverlayPng!, fit: BoxFit.cover),
-                              ),
-                            if (_depthOverlayEnabled)
-                              Align(
-                                alignment: Alignment.center,
-                                child: Container(width: 2, color: Colors.white.withOpacity(0.6)),
-                              ),
-                          ],
-                        )
-                      else if (_selectedSource == CameraSource.simulatedStereo && _isSimStereoConnected && _simStereoService.videoController != null)
-                        Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            Center(
-                              child: Video(controller: _simStereoService.videoController!),
-                            ),
-                            if (_depthOverlayEnabled && _depthOverlayPng != null)
-                              Opacity(
-                                opacity: 0.65,
-                                child: Image.memory(_depthOverlayPng!, fit: BoxFit.cover),
-                              ),
-                            if (_depthOverlayEnabled)
-                              Align(
-                                alignment: Alignment.center,
-                                child: Container(width: 2, color: Colors.white.withOpacity(0.6)),
-                              ),
-                          ],
-                        )
+                        _depthOverlayEnabled && _depthOverlayPng != null
+                            ? Center(
+                                child: Image.memory(
+                                  _depthOverlayPng!,
+                                  fit: BoxFit.contain, // important: stable sizing
+                                  gaplessPlayback: true,
+                                ),
+                              )
+                            : Center(
+                                child: Video(controller: _slp2Service.videoController!),
+                              )
+
+                      else if (_selectedSource == CameraSource.simulatedStereo &&
+                          _isSimStereoConnected &&
+                          _simStereoService.videoController != null)
+                        _depthOverlayEnabled && _depthOverlayPng != null
+                            ? Center(
+                                child: Image.memory(
+                                  _depthOverlayPng!,
+                                  fit: BoxFit.contain,
+                                  gaplessPlayback: true,
+                                ),
+                              )
+                            : Center(
+                                child: Video(controller: _simStereoService.videoController!),
+                              )
+
                       else if (_selectedSource == CameraSource.simulatedStereo && !_isSimStereoConnected)
                         const Center(
                           child: Column(
@@ -1905,6 +2010,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                         )
 
 
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
                       // Native UDP H264 stream (low latency)
                       else if (_useNativeUdp)
                         H264VideoWidget(
@@ -2103,11 +2209,19 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                               // Describe button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
+<<<<<<< HEAD
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
+                                    ? null
+                                    : _captureAndDescribe,
+                                backgroundColor: _serverAvailable &&
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
+=======
                                         (!_isConnectedToWifi && !_isConnectedToSlp2 && !_isSimStereoConnected && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndDescribe,
                                 backgroundColor: _serverAvailable &&
                                         (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -2120,11 +2234,19 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                               // Extract text button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
+<<<<<<< HEAD
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
+                                    ? null
+                                    : _captureAndExtractText,
+                                backgroundColor: _serverAvailable &&
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
+=======
                                         (!_isConnectedToWifi && !_isConnectedToSlp2 && !_isSimStereoConnected && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndExtractText,
                                 backgroundColor: _serverAvailable &&
                                         (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
@@ -2137,11 +2259,19 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                               // Face recognition button
                               FloatingActionButton(
                                 onPressed: _isLoading || !_serverAvailable ||
+<<<<<<< HEAD
+                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
+                                    ? null
+                                    : _captureAndRecognizeFace,
+                                backgroundColor: _serverAvailable &&
+                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
+=======
                                         (!_isConnectedToWifi && !_isConnectedToSlp2 && !_isSimStereoConnected && !_usePhoneCamera && !_useNativeUdp)
                                     ? null
                                     : _captureAndRecognizeFace,
                                 backgroundColor: _serverAvailable &&
                                         (_isConnectedToWifi || _isConnectedToSlp2 || _isSimStereoConnected || _usePhoneCamera || _useNativeUdp)
+>>>>>>> 713bd7d (Added sample SBS video for depth map testing & added gradient overlay)
                                     ? Colors.white
                                     : Colors.grey,
                                 child: const Icon(
