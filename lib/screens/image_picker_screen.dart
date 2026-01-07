@@ -19,6 +19,10 @@ import '../services/navigation_guidance_service.dart';
 import '../widgets/h264_video_widget.dart';
 import '../models/route_info.dart';
 import 'map_screen.dart';
+import '../services/stereo_video_source.dart';
+import '../services/depth_map_service.dart';
+import '../widgets/depth_map_painter.dart';
+import 'dart:ui' as ui;
 
 class ImagePickerScreen extends StatefulWidget {
   const ImagePickerScreen({super.key});
@@ -32,7 +36,8 @@ enum CameraSource {
   slp2Udp('SLP2 UDP'),
   slp2Rtsp('SLP2 RTSP'),
   esp32('ESP32-CAM'),
-  phone('Phone');
+  phone('Phone'),
+  stereoSim('Stereo Sim');
 
   final String label;
   const CameraSource(this.label);
@@ -83,6 +88,18 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   // Native UDP H264 streaming
   bool _useNativeUdp = false;
   H264VideoController? _h264Controller;
+
+  // Stereo simulation source
+  final StereoVideoSource _stereoVideoSource = StereoVideoSource();
+  bool _useStereoSim = false;
+
+  // Depth map overlay
+  final DepthMapService _depthMapService = DepthMapService();
+  bool _showDepthOverlay = false;
+  ui.Image? _depthMapImage;
+  bool _isProcessingDepth = false;
+  Timer? _depthProcessingTimer;
+  double _lastDepthProcessingTime = 0;
 
   @override
   void initState() {
@@ -425,6 +442,14 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       await _cameraController?.dispose();
       setState(() => _usePhoneCamera = false);
     }
+    if (_useStereoSim) {
+      await _stereoVideoSource.dispose();
+      _stopDepthProcessing();
+      setState(() {
+        _useStereoSim = false;
+        _showDepthOverlay = false;
+      });
+    }
 
     setState(() {
       _isLoading = true;
@@ -601,6 +626,14 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       await _cameraController?.dispose();
       setState(() => _usePhoneCamera = false);
     }
+    if (_useStereoSim) {
+      await _stereoVideoSource.dispose();
+      _stopDepthProcessing();
+      setState(() {
+        _useStereoSim = false;
+        _showDepthOverlay = false;
+      });
+    }
 
     setState(() {
       _isLoading = true;
@@ -683,6 +716,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       case CameraSource.phone:
         await _initializePhoneCamera();
         break;
+      case CameraSource.stereoSim:
+        await _initializeStereoSim();
+        break;
     }
   }
 
@@ -727,6 +763,14 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     if (_useNativeUdp) {
       await _h264Controller?.stopStream();
       setState(() => _useNativeUdp = false);
+    }
+    if (_useStereoSim) {
+      await _stereoVideoSource.dispose();
+      _stopDepthProcessing();
+      setState(() {
+        _useStereoSim = false;
+        _showDepthOverlay = false;
+      });
     }
 
     print('=== Phone Camera Initialization Started ===');
@@ -835,6 +879,214 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     }
   }
 
+  /// Initialize stereo simulation video source
+  Future<void> _initializeStereoSim() async {
+    // Disconnect from other sources
+    if (_isConnectedToWifi) {
+      await _wifiService.disconnect();
+      setState(() => _isConnectedToWifi = false);
+    }
+    if (_isConnectedToSlp2) {
+      await _slp2Service.disconnect();
+      setState(() => _isConnectedToSlp2 = false);
+    }
+    if (_useNativeUdp) {
+      await _h264Controller?.stopStream();
+      setState(() => _useNativeUdp = false);
+    }
+    if (_usePhoneCamera) {
+      await _cameraController?.dispose();
+      setState(() => _usePhoneCamera = false);
+    }
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    bool depthServiceReady = false;
+
+    try {
+      print('DEBUG: Initializing stereo simulation source...');
+
+      // Initialize stereo video source with sample video
+      final success = await _stereoVideoSource.initialize('asset://assets/videos/sample_stereo.mp4');
+
+      if (success) {
+        print('DEBUG: Video source initialized, starting playback...');
+        await _stereoVideoSource.play();
+
+        // Wait a moment for the video to start playing
+        await Future.delayed(const Duration(milliseconds: 500));
+        print('DEBUG: Video playing: ${_stereoVideoSource.isPlaying}');
+        print('DEBUG: Has frames: ${_stereoVideoSource.hasFrames}');
+        print('DEBUG: Video size: ${_stereoVideoSource.videoWidth}x${_stereoVideoSource.videoHeight}');
+
+        // Initialize depth map service
+        try {
+          print('DEBUG: Initializing depth map service...');
+          await _depthMapService.initialize();
+          depthServiceReady = _depthMapService.isInitialized;
+          print('DEBUG: Depth map service initialized: $depthServiceReady');
+          print('DEBUG: Using GPU: ${_depthMapService.isUsingGpu}');
+          print('DEBUG: Model input size: ${_depthMapService.inputWidth}x${_depthMapService.inputHeight}');
+        } catch (e, stack) {
+          print('WARNING: Depth map service failed to initialize: $e');
+          print('Stack: $stack');
+          depthServiceReady = false;
+        }
+
+        if (mounted) {
+          setState(() {
+            _useStereoSim = true;
+            _isLoading = false;
+          });
+
+          final message = depthServiceReady
+              ? 'Stereo simulation ready (depth enabled)'
+              : 'Stereo simulation ready (depth unavailable)';
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(message),
+              backgroundColor: depthServiceReady ? Colors.green : Colors.orange,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      } else {
+        throw Exception('Failed to initialize stereo video source');
+      }
+    } catch (e) {
+      print('Failed to initialize stereo sim: $e');
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _useStereoSim = false;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to load stereo simulation: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Toggle depth map overlay
+  void _toggleDepthOverlay() {
+    setState(() {
+      _showDepthOverlay = !_showDepthOverlay;
+    });
+
+    if (_showDepthOverlay) {
+      _startDepthProcessing();
+    } else {
+      _stopDepthProcessing();
+    }
+  }
+
+  /// Start depth map processing loop
+  void _startDepthProcessing() {
+    if (_depthProcessingTimer != null) return;
+    if (!_depthMapService.isInitialized) {
+      print('DEBUG: Depth map service not initialized - cannot start processing');
+      return;
+    }
+    if (!_stereoVideoSource.hasFrames) {
+      print('DEBUG: Video has no frames yet - waiting...');
+      // Wait for frames to be available, then start
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (_showDepthOverlay && _stereoVideoSource.hasFrames) {
+          print('DEBUG: Frames now available, starting depth processing');
+          _startDepthProcessing();
+        } else if (_showDepthOverlay) {
+          print('DEBUG: Still waiting for frames...');
+          _startDepthProcessing(); // Retry
+        }
+      });
+      return;
+    }
+
+    print('DEBUG: Starting depth processing timer');
+    _depthProcessingTimer = Timer.periodic(
+      const Duration(milliseconds: 200), // ~5 FPS
+      (_) => _processDepthFrame(),
+    );
+  }
+
+  /// Stop depth map processing
+  void _stopDepthProcessing() {
+    _depthProcessingTimer?.cancel();
+    _depthProcessingTimer = null;
+  }
+
+  /// Process a single depth frame
+  Future<void> _processDepthFrame() async {
+    if (_isProcessingDepth || !_useStereoSim) return;
+    _isProcessingDepth = true;
+
+    try {
+      print('DEBUG: [Frame] Starting depth frame processing...');
+      print('DEBUG: [Frame] Video playing: ${_stereoVideoSource.isPlaying}, has frames: ${_stereoVideoSource.hasFrames}');
+
+      final stereoPair = await _stereoVideoSource.captureStereoPair();
+      if (stereoPair == null) {
+        print('DEBUG: [Frame] stereoPair is null - capture failed');
+        _isProcessingDepth = false;
+        return;
+      }
+      print('DEBUG: [Frame] Got stereo pair - left: ${stereoPair.leftImage.length} bytes, right: ${stereoPair.rightImage.length} bytes');
+      print('DEBUG: [Frame] Stereo pair size: ${stereoPair.width}x${stereoPair.height}');
+
+      if (!_depthMapService.isInitialized) {
+        print('DEBUG: [Frame] Depth service not initialized!');
+        _isProcessingDepth = false;
+        return;
+      }
+
+      print('DEBUG: [Frame] Running depth estimation...');
+      final result = await _depthMapService.estimateDepth(stereoPair);
+      if (result == null) {
+        print('DEBUG: [Frame] Depth estimation returned null');
+        _isProcessingDepth = false;
+        return;
+      }
+      print('DEBUG: [Frame] Got depth result - ${result.width}x${result.height}, ${result.processingTimeMs}ms');
+      print('DEBUG: [Frame] Colorized RGBA size: ${result.colorizedRgba.length} bytes (expected: ${result.width * result.height * 4})');
+
+      // Validate RGBA data
+      final expectedSize = result.width * result.height * 4;
+      if (result.colorizedRgba.length != expectedSize) {
+        print('DEBUG: [Frame] ERROR: RGBA size mismatch! Got ${result.colorizedRgba.length}, expected $expectedSize');
+        _isProcessingDepth = false;
+        return;
+      }
+
+      // Convert colorized RGBA to ui.Image
+      print('DEBUG: [Frame] Converting to ui.Image...');
+      final image = await DepthMapImageHelper.rgbaToImage(
+        result.colorizedRgba.toList(),
+        result.width,
+        result.height,
+      );
+      print('DEBUG: [Frame] Converted to ui.Image - ${image.width}x${image.height}');
+
+      if (mounted) {
+        setState(() {
+          _depthMapImage = image;
+          _lastDepthProcessingTime = result.processingTimeMs;
+        });
+        print('DEBUG: [Frame] Updated state with depth image');
+      }
+    } catch (e, stack) {
+      print('DEBUG: [Frame] ERROR: $e');
+      print('DEBUG: [Frame] Stack: $stack');
+    } finally {
+      _isProcessingDepth = false;
+    }
+  }
+
   Future<void> _connectToEsp32Wifi() async {
     // Disconnect from other sources
     if (_isConnectedToSlp2) {
@@ -848,6 +1100,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     if (_usePhoneCamera) {
       await _cameraController?.dispose();
       setState(() => _usePhoneCamera = false);
+    }
+    if (_useStereoSim) {
+      await _stereoVideoSource.dispose();
+      _stopDepthProcessing();
+      setState(() => _useStereoSim = false);
     }
 
     setState(() {
@@ -1524,6 +1781,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     _pageController.dispose();
     _cameraController?.dispose();
     _h264Controller?.stopStream();
+    _stereoVideoSource.dispose();
+    _depthMapService.dispose();
+    _stopDepthProcessing();
     super.dispose();
   }
 
@@ -1690,6 +1950,79 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                             _h264Controller = controller;
                           },
                         )
+                      // Stereo simulation video
+                      else if (_useStereoSim && _stereoVideoSource.videoController != null)
+                        Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Center(
+                              child: Video(
+                                controller: _stereoVideoSource.videoController!,
+                              ),
+                            ),
+                            // Depth map overlay on right half
+                            if (_showDepthOverlay)
+                              CustomPaint(
+                                painter: DepthMapPainter(
+                                  depthMapImage: _depthMapImage,
+                                  showOverlay: _showDepthOverlay,
+                                  opacity: 0.7,
+                                  showDivider: true,
+                                ),
+                                size: Size.infinite,
+                              ),
+                            // Depth processing indicator
+                            if (_showDepthOverlay)
+                              Positioned(
+                                right: 8,
+                                bottom: 8,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black54,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (_isProcessingDepth)
+                                        const SizedBox(
+                                          width: 12,
+                                          height: 12,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                          ),
+                                        ),
+                                      if (_isProcessingDepth) const SizedBox(width: 6),
+                                      Text(
+                                        '${_lastDepthProcessingTime.toStringAsFixed(0)}ms',
+                                        style: const TextStyle(color: Colors.white, fontSize: 12),
+                                      ),
+                                      if (_depthMapService.isUsingGpu) ...[
+                                        const SizedBox(width: 4),
+                                        const Icon(Icons.memory, size: 12, color: Colors.greenAccent),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              ),
+                          ],
+                        )
+                      else if (_useStereoSim)
+                        const Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              CircularProgressIndicator(color: Colors.white),
+                              SizedBox(height: 16),
+                              Text(
+                                'Loading stereo simulation...',
+                                style: TextStyle(color: Colors.white),
+                              ),
+                            ],
+                          ),
+                        )
                       else if (_isConnectedToSlp2)
                         const Center(
                           child: Column(
@@ -1763,7 +2096,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                                           ? Icons.stream
                                           : _usePhoneCamera
                                               ? Icons.camera
-                                              : Icons.wifi_off,
+                                              : _useStereoSim
+                                                  ? Icons.threed_rotation
+                                                  : Icons.wifi_off,
                               color: _isConnectedToWifi
                                   ? Colors.blue
                                   : _isConnectedToSlp2
@@ -1772,9 +2107,33 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                                           ? Colors.cyan
                                           : _usePhoneCamera
                                               ? Colors.green
-                                              : Colors.grey,
+                                              : _useStereoSim
+                                                  ? Colors.orange
+                                                  : Colors.grey,
                               size: 32,
                             ),
+                            // Depth map toggle (only show when stereo sim is active)
+                            if (_useStereoSim) ...[
+                              const SizedBox(height: 8),
+                              GestureDetector(
+                                onTap: _toggleDepthOverlay,
+                                child: Container(
+                                  padding: const EdgeInsets.all(6),
+                                  decoration: BoxDecoration(
+                                    color: _showDepthOverlay ? Colors.green.withOpacity(0.8) : Colors.black54,
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: _showDepthOverlay
+                                        ? Border.all(color: Colors.greenAccent, width: 2)
+                                        : null,
+                                  ),
+                                  child: Icon(
+                                    Icons.layers,
+                                    color: _showDepthOverlay ? Colors.white : Colors.white70,
+                                    size: 28,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),
