@@ -4,24 +4,19 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:camera/camera.dart';
-import 'package:media_kit_video/media_kit_video.dart';
 import '../services/llama_service.dart';
 import '../services/tts_service.dart';
-import '../services/esp32_wifi_service.dart';
-import '../services/slp2_stream_service.dart';
 import '../services/hardware_key_service.dart';
 import '../services/face_recognition_service.dart';
 import '../services/foreground_service.dart';
 import '../services/location_service.dart';
 import '../services/azure_maps_service.dart';
 import '../services/navigation_guidance_service.dart';
-import '../widgets/h264_video_widget.dart';
-import '../models/route_info.dart';
-import 'map_screen.dart';
-import '../services/stereo_video_source.dart';
+import '../services/video_source.dart';
 import '../services/depth_map_service.dart';
 import '../widgets/depth_map_painter.dart';
+import '../models/route_info.dart';
+import 'map_screen.dart';
 import 'dart:ui' as ui;
 
 class ImagePickerScreen extends StatefulWidget {
@@ -31,23 +26,9 @@ class ImagePickerScreen extends StatefulWidget {
   State<ImagePickerScreen> createState() => _ImagePickerScreenState();
 }
 
-// Camera source options
-enum CameraSource {
-  slp2Udp('SLP2 UDP'),
-  slp2Rtsp('SLP2 RTSP'),
-  esp32('ESP32-CAM'),
-  phone('Phone'),
-  stereoSim('Stereo Sim');
-
-  final String label;
-  const CameraSource(this.label);
-}
-
 class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindingObserver {
   final LlamaService _llamaService = LlamaService();
   final TtsService _ttsService = TtsService();
-  final Esp32WifiService _wifiService = Esp32WifiService();
-  final Slp2StreamService _slp2Service = Slp2StreamService();
   final HardwareKeyService _hardwareKeyService = HardwareKeyService();
   final FaceRecognitionService _faceRecognitionService = FaceRecognitionService();
   final ForegroundService _foregroundService = ForegroundService();
@@ -60,38 +41,26 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   // PageView for swipe navigation between map and camera
   final PageController _pageController = PageController(initialPage: 1);
   int _currentPage = 1; // 0 = Map, 1 = Camera
+
   RouteInfo? _activeRoute;
 
-  Uint8List? _currentFrame;
+  // ignore: unused_field
   Uint8List? _snapshotImage;
   File? _capturedImage;
   String _description = '';
   bool _isLoading = false;
   bool _serverAvailable = false;
   bool _isInitializing = false;
-  bool _isConnectedToWifi = false;
-  bool _isConnectedToSlp2 = false;
   bool _hardwareKeysActive = false;
   bool _isDialogOpen = false;
 
-  // Camera source selection
+  // Unified video source
   CameraSource _selectedSource = CameraSource.slp2Udp;
+  VideoSource? _currentSource;
+  StreamSubscription<bool>? _sourceConnectionSubscription;
 
   // LLM provider selection
   LlmProvider _selectedLlmProvider = LlmProvider.gemini;
-
-  // Phone camera fallback
-  CameraController? _cameraController;
-  bool _usePhoneCamera = false;
-  List<CameraDescription>? _cameras;
-
-  // Native UDP H264 streaming
-  bool _useNativeUdp = false;
-  H264VideoController? _h264Controller;
-
-  // Stereo simulation source
-  final StereoVideoSource _stereoVideoSource = StereoVideoSource();
-  bool _useStereoSim = false;
 
   // Depth map overlay
   final DepthMapService _depthMapService = DepthMapService();
@@ -111,27 +80,16 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    print('App lifecycle state changed: $state');
+    debugPrint('App lifecycle state changed: $state');
 
     if (state == AppLifecycleState.resumed) {
-      // App came back to foreground - reconnect video widget to service
       _handleAppResumed();
     }
   }
 
-  /// Handle app returning to foreground - reconnect to service stream
   Future<void> _handleAppResumed() async {
-    print('App resumed - reconnecting to stream');
-
-    // If we're using native UDP, reconnect the video widget to the service
-    if (_useNativeUdp && _h264Controller != null) {
-      print('Reconnecting video widget to service stream...');
-      // Stop current connection and reconnect (will use service data)
-      _h264Controller?.stopStream();
-      await Future.delayed(const Duration(milliseconds: 100));
-      await _h264Controller?.startStream(5000);
-      print('Video widget reconnected');
-    }
+    debugPrint('App resumed - reconnecting to stream');
+    // Sources handle their own reconnection
   }
 
   Future<void> _initializeServices() async {
@@ -141,18 +99,17 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
 
     try {
       // Initialize face recognition service early
-      print('Initializing face recognition service...');
+      debugPrint('Initializing face recognition service...');
       try {
         await _faceRecognitionService.initialize();
-        print('Face recognition service initialized with ${_faceRecognitionService.cachedFaceCount} known faces');
+        debugPrint('Face recognition service initialized with ${_faceRecognitionService.cachedFaceCount} known faces');
       } catch (e) {
-        // Show error but continue - face recognition won't work but other features will
-        print('WARNING: Face recognition initialization failed: $e');
+        debugPrint('WARNING: Face recognition initialization failed: $e');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
+            const SnackBar(
               content: Text('Face recognition unavailable: Missing TFLite model. See assets/models/README.md'),
-              duration: const Duration(seconds: 8),
+              duration: Duration(seconds: 8),
               backgroundColor: Colors.orange,
             ),
           );
@@ -160,12 +117,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       }
 
       // Request camera permissions
-      print('Requesting camera permission...');
+      debugPrint('Requesting camera permission...');
       final cameraPermission = await Permission.camera.request();
-      print('Camera permission status: $cameraPermission');
+      debugPrint('Camera permission status: $cameraPermission');
 
       if (!cameraPermission.isGranted) {
-        print('WARNING: Camera permission not granted');
+        debugPrint('WARNING: Camera permission not granted');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -176,8 +133,6 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
           );
         }
       }
-
-      // No Bluetooth permissions needed for WiFi connection
 
       // Initialize Gemini API and TTS
       final success = await _llamaService.initialize();
@@ -192,31 +147,22 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       // Initialize map services (async, non-blocking)
       _azureMapsService.initialize().then((success) {
         if (!success) {
-          print('WARNING: Azure Maps service not configured - add AZURE_MAPS_SUBSCRIPTION_KEY to .env');
+          debugPrint('WARNING: Azure Maps service not configured - add AZURE_MAPS_SUBSCRIPTION_KEY to .env');
         }
       });
       _locationService.initialize().then((success) {
         if (!success) {
-          print('WARNING: Location service failed to initialize');
+          debugPrint('WARNING: Location service failed to initialize');
         }
       });
 
-      // Get available cameras
-      print('Querying available cameras...');
+      // Initialize depth map service
       try {
-        _cameras = await availableCameras();
-        print('Found ${_cameras?.length ?? 0} cameras:');
-        if (_cameras != null) {
-          for (var i = 0; i < _cameras!.length; i++) {
-            print('  Camera $i: ${_cameras![i].name} (${_cameras![i].lensDirection})');
-          }
-        }
+        await _depthMapService.initialize();
+        debugPrint('Depth map service initialized');
       } catch (e) {
-        print('ERROR: Failed to get available cameras: $e');
-        _cameras = null;
+        debugPrint('WARNING: Depth map service failed to initialize: $e');
       }
-
-      // WiFi doesn't require manual enabling like Bluetooth
 
       // Setup hardware key listener for Bluetooth clickers and volume buttons
       _setupHardwareKeyListener();
@@ -241,8 +187,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         // Auto-start background service for persistent operation
         await _startBackgroundService();
 
-        // Auto-connect to SLP2 UDP (default source)
-        _connectToSlp2Native();
+        // Auto-connect to default source (SLP2 UDP)
+        _switchSource(CameraSource.slp2Udp);
       }
     } catch (e) {
       setState(() {
@@ -260,96 +206,76 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     }
   }
 
-  /// Setup listener for hardware key presses (volume buttons from Bluetooth clicker)
   void _setupHardwareKeyListener() {
-    // Start listening to hardware keys
     _hardwareKeyService.startListening();
 
     setState(() {
       _hardwareKeysActive = _hardwareKeyService.isListening;
     });
 
-    // Listen to key events from AB Shutter 3 Bluetooth clicker
     _hardwareKeyService.keyStream.listen((event) {
-      print('=== AB Shutter 3 Button Press Detected ===');
-      print('Button type: ${event.keyType}');
-      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera}');
-      print('Server available: $_serverAvailable');
-      print('Is loading: $_isLoading');
-      print('Dialog open: $_isDialogOpen');
+      debugPrint('=== Hardware Button Press Detected ===');
+      debugPrint('Button type: ${event.keyType}');
+      debugPrint('Source connected: ${_currentSource?.isConnected}');
+      debugPrint('Server available: $_serverAvailable');
+      debugPrint('Is loading: $_isLoading');
+      debugPrint('Dialog open: $_isDialogOpen');
 
-      // Trigger capture on any key press if camera is available and no dialog is open
-      if (!_isLoading && !_isDialogOpen && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)) {
-        // Button 1 (Volume Up): Take photo and describe image
+      if (!_isLoading && !_isDialogOpen && _serverAvailable && _currentSource?.isConnected == true) {
         if (event.keyType == HardwareKeyType.volumeUp) {
-          print('✓ Button 1 pressed - Taking photo and describing image');
+          debugPrint('Button 1 pressed - Taking photo and describing image');
           _captureAndDescribe();
-        }
-        // Button 2 (Volume Down): Take photo and extract text (test reading)
-        else if (event.keyType == HardwareKeyType.volumeDown) {
-          print('✓ Button 2 pressed - Taking photo and extracting text');
+        } else if (event.keyType == HardwareKeyType.volumeDown) {
+          debugPrint('Button 2 pressed - Taking photo and extracting text');
           _captureAndExtractText();
-        }
-        // Other buttons (if any): Face recognition
-        else {
-          print('✓ Other button pressed - Performing face recognition');
+        } else {
+          debugPrint('Other button pressed - Performing face recognition');
           _captureAndRecognizeFace();
         }
       } else {
-        print('⚠ Button press ignored - conditions not met for capture');
+        debugPrint('Button press ignored - conditions not met for capture');
       }
     });
 
-    // Also listen to triggers from the background foreground service
     _setupForegroundServiceListener();
   }
 
-  /// Setup listener for triggers from the background foreground service.
-  /// This enables scene description even when app is backgrounded or screen is off.
   void _setupForegroundServiceListener() {
     _foregroundTriggerSubscription = _foregroundService.triggerStream.listen((event) {
-      print('=== Background Service Trigger ===');
-      print('Source: ${event['source']}');
-      print('Timestamp: ${event['timestamp']}');
-      print('Camera available: ${_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp}');
-      print('Server available: $_serverAvailable');
-      print('Is loading: $_isLoading');
+      debugPrint('=== Background Service Trigger ===');
+      debugPrint('Source: ${event['source']}');
+      debugPrint('Source connected: ${_currentSource?.isConnected}');
+      debugPrint('Server available: $_serverAvailable');
+      debugPrint('Is loading: $_isLoading');
 
-      // Trigger capture if camera is available
-      if (!_isLoading && _serverAvailable && (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)) {
-        print('✓ Background trigger - Taking photo and describing image');
+      if (!_isLoading && _serverAvailable && _currentSource?.isConnected == true) {
+        debugPrint('Background trigger - Taking photo and describing image');
         _captureAndDescribe();
       } else {
-        print('⚠ Background trigger ignored - conditions not met for capture');
+        debugPrint('Background trigger ignored - conditions not met for capture');
         _ttsService.speak('Cannot capture. Camera or server not ready.');
       }
     });
   }
 
-  /// Start the background foreground service for persistent operation.
-  /// This keeps the UDP receiver alive and enables hardware button triggers
-  /// even when the app is minimized or the screen is off.
   Future<void> _startBackgroundService() async {
     if (_backgroundServiceRunning) {
-      print('Background service already running');
+      debugPrint('Background service already running');
       return;
     }
 
-    // Request notification permission first (required on Android 13+)
     if (!await _foregroundService.hasNotificationPermission()) {
       await _foregroundService.requestNotificationPermission();
     }
 
-    // Request battery optimization exemption for reliable background operation
     await _foregroundService.requestBatteryOptimizationExemption();
 
-    // Start the service
     final success = await _foregroundService.startService(port: 5000);
     if (success) {
       setState(() {
         _backgroundServiceRunning = true;
       });
-      print('Background service started successfully');
+      debugPrint('Background service started successfully');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -360,7 +286,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         );
       }
     } else {
-      print('Failed to start background service');
+      debugPrint('Failed to start background service');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -373,13 +299,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     }
   }
 
-  /// Stop the background foreground service.
   Future<void> _stopBackgroundService() async {
     await _foregroundService.stopService();
     setState(() {
       _backgroundServiceRunning = false;
     });
-    print('Background service stopped');
+    debugPrint('Background service stopped');
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -390,335 +315,65 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     }
   }
 
-  Future<void> _showCameraSourceDialog() async {
-    final choice = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Select Camera Source'),
-        content: const Text('Choose which camera to use:'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, 'wifi'),
-            child: const Text('ESP32-CAM WiFi (192.168.4.1)'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, 'slp2'),
-            child: const Text('StereoPi SLP2 (RTSP)'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, 'slp2_native'),
-            child: const Text('SLP2 Native UDP (Low Latency)'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, 'phone'),
-            child: const Text('Phone Camera'),
-          ),
-        ],
-      ),
-    );
-
-    if (choice == 'wifi') {
-      await _connectToEsp32Wifi();
-    } else if (choice == 'slp2') {
-      await _connectToSlp2();
-    } else if (choice == 'slp2_native') {
-      await _connectToSlp2Native();
-    } else if (choice == 'phone') {
-      await _initializePhoneCamera();
-    }
-  }
-
-  Future<void> _connectToSlp2() async {
-    // Disconnect from other sources
-    if (_isConnectedToWifi) {
-      await _wifiService.disconnect();
-      setState(() => _isConnectedToWifi = false);
-    }
-    if (_useNativeUdp) {
-      await _h264Controller?.stopStream();
-      setState(() => _useNativeUdp = false);
-    }
-    if (_usePhoneCamera) {
-      await _cameraController?.dispose();
-      setState(() => _usePhoneCamera = false);
-    }
-    if (_useStereoSim) {
-      await _stereoVideoSource.dispose();
-      _stopDepthProcessing();
-      setState(() {
-        _useStereoSim = false;
-        _showDepthOverlay = false;
-      });
-    }
-
-    setState(() {
-      _isLoading = true;
-      _selectedSource = CameraSource.slp2Rtsp;
-    });
-
-    // Step 1: Auto-connect to SLP2 WiFi and setup cellular
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Connecting to SLP2 WiFi...'),
-        duration: Duration(seconds: 2),
-        backgroundColor: Colors.blue,
-      ),
-    );
-
-    final connectionResult = await _slp2Service.autoConnect();
-    final wifiConnected = connectionResult['wifi'] as bool;
-    final cellularReady = connectionResult['cellular'] as bool;
-
-    if (!wifiConnected) {
-      // WiFi connection failed - show manual connection dialog
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Auto-connect failed. Please connect to "${Slp2StreamService.defaultSsid}" WiFi manually.',
-            ),
-            duration: const Duration(seconds: 5),
-            backgroundColor: Colors.orange,
-          ),
-        );
-      }
-    } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'WiFi connected! ${cellularReady ? "Internet via cellular ready." : "Warning: No cellular for internet."}',
-            ),
-            duration: const Duration(seconds: 2),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    }
-
-    // Step 2: Show IP dialog (pre-filled with default)
-    final ipController = TextEditingController(text: Slp2StreamService.defaultSlp2Ip);
-
-    final ip = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Connect to SLP2 (RTSP)'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('SLP2 IP address:'),
-            const SizedBox(height: 8),
-            TextField(
-              controller: ipController,
-              decoration: const InputDecoration(
-                hintText: '192.168.50.1',
-                border: OutlineInputBorder(),
-              ),
-              keyboardType: TextInputType.number,
-            ),
-            const SizedBox(height: 12),
-            Text(
-              wifiConnected
-                  ? 'WiFi connected to ${Slp2StreamService.defaultSsid}'
-                  : 'Please connect to SLP2 WiFi manually',
-              style: TextStyle(
-                fontSize: 12,
-                color: wifiConnected ? Colors.green : Colors.orange,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              _slp2Service.disconnect();
-              Navigator.pop(context);
-            },
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, ipController.text),
-            child: const Text('Connect'),
-          ),
-        ],
-      ),
-    );
-
-    if (ip == null || ip.isEmpty) {
-      setState(() {
-        _isLoading = false;
-      });
-      return;
-    }
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Connecting to RTSP stream at $ip:554...'),
-        duration: const Duration(seconds: 3),
-        backgroundColor: Colors.blue,
-      ),
-    );
-
-    final success = await _slp2Service.connect(ip: ip);
-
-    if (success) {
-      // Listen to connection state changes
-      _slp2Service.connectionStateStream.listen((connected) {
-        if (mounted && !connected && _isConnectedToSlp2) {
-          setState(() {
-            _isConnectedToSlp2 = false;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('SLP2 stream disconnected'),
-              backgroundColor: Colors.orange,
-            ),
-          );
-        }
-      });
-
-      if (mounted) {
-        setState(() {
-          _isConnectedToSlp2 = true;
-          _isLoading = false;
-        });
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Receiving SLP2 stream'),
-            backgroundColor: Colors.green,
-          ),
-        );
-
-        _ttsService.speak('SLP2 camera connected');
-      }
-    } else {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to connect to RTSP stream. Check network and SLP2 settings.'),
-            backgroundColor: Colors.red,
-            duration: Duration(seconds: 5),
-          ),
-        );
-
-        _ttsService.speak('Failed to connect to SLP2');
-      }
-    }
-  }
-
-  Future<void> _connectToSlp2Native() async {
-    // Disconnect from other sources
-    if (_isConnectedToWifi) {
-      await _wifiService.disconnect();
-      setState(() => _isConnectedToWifi = false);
-    }
-    if (_isConnectedToSlp2) {
-      await _slp2Service.disconnect();
-      setState(() => _isConnectedToSlp2 = false);
-    }
-    if (_usePhoneCamera) {
-      await _cameraController?.dispose();
-      setState(() => _usePhoneCamera = false);
-    }
-    if (_useStereoSim) {
-      await _stereoVideoSource.dispose();
-      _stopDepthProcessing();
-      setState(() {
-        _useStereoSim = false;
-        _showDepthOverlay = false;
-      });
-    }
-
-    setState(() {
-      _isLoading = true;
-    });
-
-    // Step 1: Auto-connect to SLP2 WiFi and setup cellular
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Connecting to SLP2 WiFi...'),
-        duration: Duration(seconds: 2),
-        backgroundColor: Colors.blue,
-      ),
-    );
-
-    final connectionResult = await _slp2Service.autoConnect();
-    final wifiConnected = connectionResult['wifi'] as bool;
-    final cellularReady = connectionResult['cellular'] as bool;
-
-    if (!wifiConnected) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Auto-connect failed. Please connect to "${Slp2StreamService.defaultSsid}" WiFi manually.',
-            ),
-            duration: const Duration(seconds: 5),
-            backgroundColor: Colors.orange,
-          ),
-        );
-      }
-    } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'WiFi connected! ${cellularReady ? "Internet via cellular ready." : "Warning: No cellular for internet."}',
-            ),
-            duration: const Duration(seconds: 2),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    }
-
-    setState(() {
-      _useNativeUdp = true;
-      _isLoading = false;
-      _selectedSource = CameraSource.slp2Udp;
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Native UDP H264 stream started on port 5000.'),
-        duration: Duration(seconds: 3),
-        backgroundColor: Colors.green,
-      ),
-    );
-
-    _ttsService.speak('Native UDP streaming started');
-  }
-
   /// Switch to a different camera source
   Future<void> _switchSource(CameraSource source) async {
-    if (_selectedSource == source) return;
+    if (_selectedSource == source && _currentSource != null) return;
 
     setState(() {
-      _selectedSource = source;
+      _isLoading = true;
     });
 
-    switch (source) {
-      case CameraSource.slp2Udp:
-        await _connectToSlp2Native();
-        break;
-      case CameraSource.slp2Rtsp:
-        await _connectToSlp2();
-        break;
-      case CameraSource.esp32:
-        await _connectToEsp32Wifi();
-        break;
-      case CameraSource.phone:
-        await _initializePhoneCamera();
-        break;
-      case CameraSource.stereoSim:
-        await _initializeStereoSim();
-        break;
+    // Stop depth processing
+    _stopDepthProcessing();
+    setState(() {
+      _showDepthOverlay = false;
+    });
+
+    // Disconnect from current source
+    await _sourceConnectionSubscription?.cancel();
+    await _currentSource?.disconnect();
+
+    // Create new source
+    _currentSource = VideoSourceFactory.create(source);
+
+    // Listen to connection state
+    _sourceConnectionSubscription = _currentSource!.connectionStateStream.listen((connected) {
+      if (mounted && !connected && _currentSource?.isConnected == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${source.label} disconnected'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    });
+
+    // Connect to new source
+    final success = await _currentSource!.connect(context);
+
+    if (mounted) {
+      setState(() {
+        _selectedSource = source;
+        _isLoading = false;
+      });
+
+      if (success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${source.label} connected'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+        _ttsService.speak('${source.label} connected');
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to connect to ${source.label}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -750,229 +405,6 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     }
   }
 
-  Future<void> _initializePhoneCamera() async {
-    // Disconnect from other sources
-    if (_isConnectedToWifi) {
-      await _wifiService.disconnect();
-      setState(() => _isConnectedToWifi = false);
-    }
-    if (_isConnectedToSlp2) {
-      await _slp2Service.disconnect();
-      setState(() => _isConnectedToSlp2 = false);
-    }
-    if (_useNativeUdp) {
-      await _h264Controller?.stopStream();
-      setState(() => _useNativeUdp = false);
-    }
-    if (_useStereoSim) {
-      await _stereoVideoSource.dispose();
-      _stopDepthProcessing();
-      setState(() {
-        _useStereoSim = false;
-        _showDepthOverlay = false;
-      });
-    }
-
-    print('=== Phone Camera Initialization Started ===');
-    print('Available cameras: ${_cameras?.length ?? 0}');
-
-    if (_cameras == null || _cameras!.isEmpty) {
-      final errorMsg = 'No cameras found on device. Camera permission may be denied.';
-      print('ERROR: $errorMsg');
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(errorMsg),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 5),
-          ),
-        );
-        _ttsService.speak('Camera not available. Please check permissions.');
-      }
-      return;
-    }
-
-    // Show loading state
-    if (mounted) {
-      setState(() {
-        _isLoading = true;
-      });
-    }
-
-    try {
-      // Find back camera
-      final backCamera = _cameras!.firstWhere(
-        (camera) => camera.lensDirection == CameraLensDirection.back,
-        orElse: () => _cameras!.first,
-      );
-
-      print('Initializing phone camera: ${backCamera.name}');
-      print('Camera direction: ${backCamera.lensDirection}');
-
-      _cameraController = CameraController(
-        backCamera,
-        ResolutionPreset.high,
-        enableAudio: false,
-      );
-
-      print('Starting camera controller initialization...');
-      await _cameraController!.initialize();
-
-      print('✓ Phone camera initialized successfully');
-
-      if (mounted) {
-        setState(() {
-          _usePhoneCamera = true;
-          _isLoading = false;
-          _selectedSource = CameraSource.phone;
-        });
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Phone camera ready'),
-            backgroundColor: Colors.green,
-            duration: Duration(seconds: 2),
-          ),
-        );
-
-        _ttsService.speak('Camera ready');
-      }
-    } catch (e, stackTrace) {
-      print('✗ Failed to initialize phone camera');
-      print('Error: $e');
-      print('Stack trace: $stackTrace');
-
-      // Provide more specific error messages
-      String userMessage = 'Failed to initialize phone camera';
-      String spokenMessage = 'Camera initialization failed';
-
-      if (e.toString().contains('permission')) {
-        userMessage = 'Camera permission denied. Please grant camera access in settings.';
-        spokenMessage = 'Camera permission denied';
-      } else if (e.toString().contains('in use')) {
-        userMessage = 'Camera is being used by another app. Please close other camera apps.';
-        spokenMessage = 'Camera is in use by another app';
-      } else if (e.toString().contains('not available')) {
-        userMessage = 'Camera not available. It may be disconnected or disabled.';
-        spokenMessage = 'Camera not available';
-      } else {
-        userMessage = 'Failed to initialize camera: $e';
-      }
-
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _usePhoneCamera = false;
-        });
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(userMessage),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 7),
-          ),
-        );
-
-        _ttsService.speak(spokenMessage);
-      }
-    }
-  }
-
-  /// Initialize stereo simulation video source
-  Future<void> _initializeStereoSim() async {
-    // Disconnect from other sources
-    if (_isConnectedToWifi) {
-      await _wifiService.disconnect();
-      setState(() => _isConnectedToWifi = false);
-    }
-    if (_isConnectedToSlp2) {
-      await _slp2Service.disconnect();
-      setState(() => _isConnectedToSlp2 = false);
-    }
-    if (_useNativeUdp) {
-      await _h264Controller?.stopStream();
-      setState(() => _useNativeUdp = false);
-    }
-    if (_usePhoneCamera) {
-      await _cameraController?.dispose();
-      setState(() => _usePhoneCamera = false);
-    }
-
-    setState(() {
-      _isLoading = true;
-    });
-
-    bool depthServiceReady = false;
-
-    try {
-      print('DEBUG: Initializing stereo simulation source...');
-
-      // Initialize stereo video source with sample video
-      final success = await _stereoVideoSource.initialize('asset://assets/videos/sample_stereo.mp4');
-
-      if (success) {
-        print('DEBUG: Video source initialized, starting playback...');
-        await _stereoVideoSource.play();
-
-        // Wait a moment for the video to start playing
-        await Future.delayed(const Duration(milliseconds: 500));
-        print('DEBUG: Video playing: ${_stereoVideoSource.isPlaying}');
-        print('DEBUG: Has frames: ${_stereoVideoSource.hasFrames}');
-        print('DEBUG: Video size: ${_stereoVideoSource.videoWidth}x${_stereoVideoSource.videoHeight}');
-
-        // Initialize depth map service
-        try {
-          print('DEBUG: Initializing depth map service...');
-          await _depthMapService.initialize();
-          depthServiceReady = _depthMapService.isInitialized;
-          print('DEBUG: Depth map service initialized: $depthServiceReady');
-          print('DEBUG: Using GPU: ${_depthMapService.isUsingGpu}');
-          print('DEBUG: Model input size: ${_depthMapService.inputWidth}x${_depthMapService.inputHeight}');
-        } catch (e, stack) {
-          print('WARNING: Depth map service failed to initialize: $e');
-          print('Stack: $stack');
-          depthServiceReady = false;
-        }
-
-        if (mounted) {
-          setState(() {
-            _useStereoSim = true;
-            _isLoading = false;
-          });
-
-          final message = depthServiceReady
-              ? 'Stereo simulation ready (depth enabled)'
-              : 'Stereo simulation ready (depth unavailable)';
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(message),
-              backgroundColor: depthServiceReady ? Colors.green : Colors.orange,
-              duration: const Duration(seconds: 2),
-            ),
-          );
-        }
-      } else {
-        throw Exception('Failed to initialize stereo video source');
-      }
-    } catch (e) {
-      print('Failed to initialize stereo sim: $e');
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _useStereoSim = false;
-        });
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to load stereo simulation: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
-
   /// Toggle depth map overlay
   void _toggleDepthOverlay() {
     setState(() {
@@ -990,25 +422,15 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   void _startDepthProcessing() {
     if (_depthProcessingTimer != null) return;
     if (!_depthMapService.isInitialized) {
-      print('DEBUG: Depth map service not initialized - cannot start processing');
+      debugPrint('Depth map service not initialized - cannot start processing');
       return;
     }
-    if (!_stereoVideoSource.hasFrames) {
-      print('DEBUG: Video has no frames yet - waiting...');
-      // Wait for frames to be available, then start
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (_showDepthOverlay && _stereoVideoSource.hasFrames) {
-          print('DEBUG: Frames now available, starting depth processing');
-          _startDepthProcessing();
-        } else if (_showDepthOverlay) {
-          print('DEBUG: Still waiting for frames...');
-          _startDepthProcessing(); // Retry
-        }
-      });
+    if (_currentSource?.isConnected != true) {
+      debugPrint('No source connected - cannot start depth processing');
       return;
     }
 
-    print('DEBUG: Starting depth processing timer');
+    debugPrint('Starting depth processing timer');
     _depthProcessingTimer = Timer.periodic(
       const Duration(milliseconds: 200), // ~5 FPS
       (_) => _processDepthFrame(),
@@ -1023,300 +445,99 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
 
   /// Process a single depth frame
   Future<void> _processDepthFrame() async {
-    if (_isProcessingDepth || !_useStereoSim) return;
+    if (_isProcessingDepth || _currentSource?.isConnected != true) return;
     _isProcessingDepth = true;
 
     try {
-      print('DEBUG: [Frame] Starting depth frame processing...');
-      print('DEBUG: [Frame] Video playing: ${_stereoVideoSource.isPlaying}, has frames: ${_stereoVideoSource.hasFrames}');
-
-      final stereoPair = await _stereoVideoSource.captureStereoPair();
-      if (stereoPair == null) {
-        print('DEBUG: [Frame] stereoPair is null - capture failed');
+      final frame = await _currentSource!.captureFrame();
+      if (frame == null) {
         _isProcessingDepth = false;
         return;
       }
-      print('DEBUG: [Frame] Got stereo pair - left: ${stereoPair.leftImage.length} bytes, right: ${stereoPair.rightImage.length} bytes');
-      print('DEBUG: [Frame] Stereo pair size: ${stereoPair.width}x${stereoPair.height}');
 
       if (!_depthMapService.isInitialized) {
-        print('DEBUG: [Frame] Depth service not initialized!');
         _isProcessingDepth = false;
         return;
       }
 
-      print('DEBUG: [Frame] Running depth estimation...');
-      final result = await _depthMapService.estimateDepth(stereoPair);
+      final result = await _depthMapService.estimateDepthFromImage(frame);
       if (result == null) {
-        print('DEBUG: [Frame] Depth estimation returned null');
         _isProcessingDepth = false;
         return;
       }
-      print('DEBUG: [Frame] Got depth result - ${result.width}x${result.height}, ${result.processingTimeMs}ms');
-      print('DEBUG: [Frame] Colorized RGBA size: ${result.colorizedRgba.length} bytes (expected: ${result.width * result.height * 4})');
 
       // Validate RGBA data
       final expectedSize = result.width * result.height * 4;
       if (result.colorizedRgba.length != expectedSize) {
-        print('DEBUG: [Frame] ERROR: RGBA size mismatch! Got ${result.colorizedRgba.length}, expected $expectedSize');
+        debugPrint('RGBA size mismatch! Got ${result.colorizedRgba.length}, expected $expectedSize');
         _isProcessingDepth = false;
         return;
       }
 
       // Convert colorized RGBA to ui.Image
-      print('DEBUG: [Frame] Converting to ui.Image...');
       final image = await DepthMapImageHelper.rgbaToImage(
         result.colorizedRgba.toList(),
         result.width,
         result.height,
       );
-      print('DEBUG: [Frame] Converted to ui.Image - ${image.width}x${image.height}');
 
       if (mounted) {
         setState(() {
           _depthMapImage = image;
           _lastDepthProcessingTime = result.processingTimeMs;
         });
-        print('DEBUG: [Frame] Updated state with depth image');
       }
     } catch (e, stack) {
-      print('DEBUG: [Frame] ERROR: $e');
-      print('DEBUG: [Frame] Stack: $stack');
+      debugPrint('Depth processing error: $e');
+      debugPrint('Stack: $stack');
     } finally {
       _isProcessingDepth = false;
     }
   }
 
-  Future<void> _connectToEsp32Wifi() async {
-    // Disconnect from other sources
-    if (_isConnectedToSlp2) {
-      await _slp2Service.disconnect();
-      setState(() => _isConnectedToSlp2 = false);
-    }
-    if (_useNativeUdp) {
-      await _h264Controller?.stopStream();
-      setState(() => _useNativeUdp = false);
-    }
-    if (_usePhoneCamera) {
-      await _cameraController?.dispose();
-      setState(() => _usePhoneCamera = false);
-    }
-    if (_useStereoSim) {
-      await _stereoVideoSource.dispose();
-      _stopDepthProcessing();
-      setState(() => _useStereoSim = false);
+  /// Capture frame and get description from LLM
+  Future<void> _captureAndDescribe() async {
+    if (_currentSource?.isConnected != true) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No camera available'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
     }
 
     setState(() {
       _isLoading = true;
-      _selectedSource = CameraSource.esp32;
+      _description = '';
     });
 
-    // Inform user to connect to ESP32-CAM WiFi network first
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Connecting to ESP32-CAM at 192.168.4.1...'),
-        duration: Duration(seconds: 2),
-        backgroundColor: Colors.blue,
-      ),
-    );
-
-    final success = await _wifiService.connect(esp32Ip: '192.168.4.1');
-
-    if (success) {
-      // Listen to image stream
-      _wifiService.imageStream.listen((imageData) {
-        if (mounted) {
-          setState(() {
-            _currentFrame = imageData;
-          });
-        }
-      });
-
-      // Listen to connection state changes
-      _wifiService.connectionStateStream.listen((connected) {
-        if (mounted && !connected && _isConnectedToWifi) {
-          setState(() {
-            _isConnectedToWifi = false;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('ESP32-CAM disconnected'),
-              backgroundColor: Colors.orange,
-            ),
-          );
-        }
-      });
-
-      if (mounted) {
-        setState(() {
-          _isConnectedToWifi = true;
-          _isLoading = false;
-        });
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Connected to ESP32-CAM WiFi'),
-            backgroundColor: Colors.green,
-          ),
-        );
-
-        _ttsService.speak('ESP32 camera connected');
-      }
-    } else {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to connect to ESP32-CAM. Make sure you are connected to ESP32-CAM-AP WiFi network.'),
-            backgroundColor: Colors.red,
-            duration: Duration(seconds: 5),
-          ),
-        );
-
-        _ttsService.speak('Failed to connect to ESP32 camera');
-      }
-    }
-  }
-
-
-  Future<void> _captureAndDescribe() async {
-    File? imageFile;
-
-    // Capture from phone camera
-    if (_usePhoneCamera && _cameraController != null && _cameraController!.value.isInitialized) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-        });
-
-        final XFile image = await _cameraController!.takePicture();
-        imageFile = File(image.path);
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Failed to capture from phone camera: $e'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-        setState(() {
-          _isLoading = false;
-        });
-        return;
-      }
-    }
-    // Capture from WiFi camera (ESP32)
-    else if (_isConnectedToWifi && _currentFrame != null) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-          _snapshotImage = _currentFrame;
-        });
-
-        // Save current frame to a temporary file
-        final tempDir = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
-        await tempFile.writeAsBytes(_currentFrame!);
-        imageFile = tempFile;
-      } catch (e) {
-        setState(() {
-          _description = 'Error: $e';
-          _isLoading = false;
-        });
-        return;
-      }
-    }
-    // Capture from SLP2 (UDP H264)
-    else if (_isConnectedToSlp2) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-        });
-
-        // Capture frame from VLC player
-        final frameBytes = await _slp2Service.captureFrame();
-        if (frameBytes == null) {
-          throw Exception('Failed to capture frame from SLP2');
-        }
-
-        _snapshotImage = frameBytes;
-
-        // Save to temporary file
-        final tempDir = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
-        await tempFile.writeAsBytes(frameBytes);
-        imageFile = tempFile;
-      } catch (e) {
-        setState(() {
-          _description = 'Error: $e';
-          _isLoading = false;
-        });
-        return;
-      }
-    }
-    // Capture from Native UDP H264 stream (low latency)
-    else if (_useNativeUdp && _h264Controller != null) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-        });
-
-        // Capture frame from native H264 decoder
-        final frameBytes = await _h264Controller!.captureFrame();
-        if (frameBytes == null) {
-          throw Exception('Failed to capture frame from native UDP stream');
-        }
-
-        _snapshotImage = frameBytes;
-
-        // Save to temporary file
-        final tempDir = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final tempFile = File('${tempDir.path}/native_udp_snapshot_$timestamp.jpg');
-        await tempFile.writeAsBytes(frameBytes);
-        imageFile = tempFile;
-      } catch (e) {
-        setState(() {
-          _description = 'Error: $e';
-          _isLoading = false;
-        });
-        return;
-      }
-    } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No camera available'),
-            backgroundColor: Colors.orange,
-          ),
-        );
-      }
-      return;
-    }
-
     try {
+      final frameBytes = await _currentSource!.captureFrame();
+      if (frameBytes == null) {
+        throw Exception('Failed to capture frame');
+      }
+
+      _snapshotImage = frameBytes;
+
+      // Save to temporary file
+      final tempDir = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
+      await tempFile.writeAsBytes(frameBytes);
+
       setState(() {
-        _capturedImage = imageFile;
+        _capturedImage = tempFile;
       });
 
       // Get description from LLM
-      final response = await _llamaService.describeImage(imageFile!.path);
+      final response = await _llamaService.describeImage(tempFile.path);
 
       setState(() {
         if (response.success) {
           _description = response.content;
-          // Speak the description immediately
           _ttsService.speak(_description);
         } else {
           _description = 'Error: ${response.error}';
@@ -1331,117 +552,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     }
   }
 
+  /// Capture frame and extract text from LLM
   Future<void> _captureAndExtractText() async {
-    File? imageFile;
-
-    // Capture from phone camera
-    if (_usePhoneCamera && _cameraController != null && _cameraController!.value.isInitialized) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-        });
-
-        final XFile image = await _cameraController!.takePicture();
-        imageFile = File(image.path);
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Failed to capture from phone camera: $e'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-        setState(() {
-          _isLoading = false;
-        });
-        return;
-      }
-    }
-    // Capture from WiFi camera (ESP32)
-    else if (_isConnectedToWifi && _currentFrame != null) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-          _snapshotImage = _currentFrame;
-        });
-
-        // Save current frame to a temporary file
-        final tempDir = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
-        await tempFile.writeAsBytes(_currentFrame!);
-        imageFile = tempFile;
-      } catch (e) {
-        setState(() {
-          _description = 'Error: $e';
-          _isLoading = false;
-        });
-        return;
-      }
-    }
-    // Capture from SLP2 (UDP H264)
-    else if (_isConnectedToSlp2) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-        });
-
-        // Capture frame from VLC player
-        final frameBytes = await _slp2Service.captureFrame();
-        if (frameBytes == null) {
-          throw Exception('Failed to capture frame from SLP2');
-        }
-
-        _snapshotImage = frameBytes;
-
-        // Save to temporary file
-        final tempDir = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
-        await tempFile.writeAsBytes(frameBytes);
-        imageFile = tempFile;
-      } catch (e) {
-        setState(() {
-          _description = 'Error: $e';
-          _isLoading = false;
-        });
-        return;
-      }
-    }
-    // Capture from Native UDP H264 stream (low latency)
-    else if (_useNativeUdp && _h264Controller != null) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-        });
-
-        // Capture frame from native H264 decoder
-        final frameBytes = await _h264Controller!.captureFrame();
-        if (frameBytes == null) {
-          throw Exception('Failed to capture frame from native UDP stream');
-        }
-
-        _snapshotImage = frameBytes;
-
-        // Save to temporary file
-        final tempDir = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final tempFile = File('${tempDir.path}/native_udp_snapshot_$timestamp.jpg');
-        await tempFile.writeAsBytes(frameBytes);
-        imageFile = tempFile;
-      } catch (e) {
-        setState(() {
-          _description = 'Error: $e';
-          _isLoading = false;
-        });
-        return;
-      }
-    } else {
+    if (_currentSource?.isConnected != true) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -1453,18 +566,35 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       return;
     }
 
+    setState(() {
+      _isLoading = true;
+      _description = '';
+    });
+
     try {
+      final frameBytes = await _currentSource!.captureFrame();
+      if (frameBytes == null) {
+        throw Exception('Failed to capture frame');
+      }
+
+      _snapshotImage = frameBytes;
+
+      // Save to temporary file
+      final tempDir = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
+      await tempFile.writeAsBytes(frameBytes);
+
       setState(() {
-        _capturedImage = imageFile;
+        _capturedImage = tempFile;
       });
 
       // Extract text from LLM
-      final response = await _llamaService.extractText(imageFile!.path);
+      final response = await _llamaService.extractText(tempFile.path);
 
       setState(() {
         if (response.success) {
           _description = response.content;
-          // Speak the extracted text immediately
           _ttsService.speak(_description);
         } else {
           _description = 'Error: ${response.error}';
@@ -1479,8 +609,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     }
   }
 
+  /// Capture frame and recognize face
   Future<void> _captureAndRecognizeFace() async {
-    // Check if face recognition is available
     if (!_faceRecognitionService.isInitialized) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1495,116 +625,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       return;
     }
 
-    File? imageFile;
-
-    // Capture from phone camera
-    if (_usePhoneCamera && _cameraController != null && _cameraController!.value.isInitialized) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-        });
-
-        final XFile image = await _cameraController!.takePicture();
-        imageFile = File(image.path);
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Failed to capture from phone camera: $e'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-        setState(() {
-          _isLoading = false;
-        });
-        return;
-      }
-    }
-    // Capture from WiFi camera (ESP32)
-    else if (_isConnectedToWifi && _currentFrame != null) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-          _snapshotImage = _currentFrame;
-        });
-
-        // Save current frame to a temporary file
-        final tempDir = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
-        await tempFile.writeAsBytes(_currentFrame!);
-        imageFile = tempFile;
-      } catch (e) {
-        setState(() {
-          _description = 'Error: $e';
-          _isLoading = false;
-        });
-        return;
-      }
-    }
-    // Capture from SLP2 (UDP H264)
-    else if (_isConnectedToSlp2) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-        });
-
-        // Capture frame from VLC player
-        final frameBytes = await _slp2Service.captureFrame();
-        if (frameBytes == null) {
-          throw Exception('Failed to capture frame from SLP2');
-        }
-
-        _snapshotImage = frameBytes;
-
-        // Save to temporary file
-        final tempDir = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final tempFile = File('${tempDir.path}/slp2_snapshot_$timestamp.jpg');
-        await tempFile.writeAsBytes(frameBytes);
-        imageFile = tempFile;
-      } catch (e) {
-        setState(() {
-          _description = 'Error: $e';
-          _isLoading = false;
-        });
-        return;
-      }
-    }
-    // Capture from Native UDP H264 stream (low latency)
-    else if (_useNativeUdp && _h264Controller != null) {
-      try {
-        setState(() {
-          _isLoading = true;
-          _description = '';
-        });
-
-        // Capture frame from native H264 decoder
-        final frameBytes = await _h264Controller!.captureFrame();
-        if (frameBytes == null) {
-          throw Exception('Failed to capture frame from native UDP stream');
-        }
-
-        _snapshotImage = frameBytes;
-
-        // Save to temporary file
-        final tempDir = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final tempFile = File('${tempDir.path}/native_udp_snapshot_$timestamp.jpg');
-        await tempFile.writeAsBytes(frameBytes);
-        imageFile = tempFile;
-      } catch (e) {
-        setState(() {
-          _description = 'Error: $e';
-          _isLoading = false;
-        });
-        return;
-      }
-    } else {
+    if (_currentSource?.isConnected != true) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -1616,13 +637,31 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       return;
     }
 
+    setState(() {
+      _isLoading = true;
+      _description = '';
+    });
+
     try {
+      final frameBytes = await _currentSource!.captureFrame();
+      if (frameBytes == null) {
+        throw Exception('Failed to capture frame');
+      }
+
+      _snapshotImage = frameBytes;
+
+      // Save to temporary file
+      final tempDir = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final tempFile = File('${tempDir.path}/snapshot_$timestamp.jpg');
+      await tempFile.writeAsBytes(frameBytes);
+
       setState(() {
-        _capturedImage = imageFile;
+        _capturedImage = tempFile;
       });
 
-      // Use new ML-based face recognition
-      final result = await _faceRecognitionService.recognizeFace(imageFile!);
+      // Use ML-based face recognition
+      final result = await _faceRecognitionService.recognizeFace(tempFile);
 
       if (!mounted) return;
 
@@ -1633,7 +672,6 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
           _description = issue.message ?? 'Face quality check failed';
           _isLoading = false;
         });
-        // Speak the issue immediately
         _ttsService.speak(_description);
         return;
       }
@@ -1652,7 +690,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         setState(() {
           _isLoading = false;
         });
-        _showNameInputDialog(imageFile);
+        _showNameInputDialog(tempFile);
       }
     } catch (e) {
       setState(() {
@@ -1666,10 +704,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   Future<void> _showNameInputDialog(File imageFile) async {
     final TextEditingController nameController = TextEditingController();
 
-    // Speak the prompt
     _ttsService.speak('Person not recognized. Please enter their name.');
 
-    // Set dialog open flag to prevent hardware key triggers
     setState(() {
       _isDialogOpen = true;
     });
@@ -1709,14 +745,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       ),
     );
 
-    // Clear dialog open flag
     setState(() {
       _isDialogOpen = false;
     });
 
     if (name != null && name.trim().isNotEmpty) {
       try {
-        // Show loading state
         if (mounted) {
           setState(() {
             _isLoading = true;
@@ -1724,7 +758,6 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
           });
         }
 
-        // Save face to bank (includes quality validation and embedding extraction)
         await _faceRecognitionService.addFace(imageFile, name.trim());
 
         if (mounted) {
@@ -1742,7 +775,6 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
           );
         }
       } catch (e) {
-        // Extract the actual error message
         final errorMessage = e.toString().replaceFirst('Exception: ', '').replaceFirst('Failed to add face: ', '');
 
         if (mounted) {
@@ -1767,11 +799,10 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    // Stop background service when app is closed
     _foregroundService.stopService();
     _foregroundTriggerSubscription?.cancel();
-    _wifiService.dispose();
-    _slp2Service.dispose();
+    _sourceConnectionSubscription?.cancel();
+    _currentSource?.disconnect();
     _hardwareKeyService.dispose();
     _llamaService.dispose();
     _ttsService.dispose();
@@ -1779,9 +810,6 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     _navigationService.dispose();
     _locationService.dispose();
     _pageController.dispose();
-    _cameraController?.dispose();
-    _h264Controller?.stopStream();
-    _stereoVideoSource.dispose();
     _depthMapService.dispose();
     _stopDepthProcessing();
     super.dispose();
@@ -1865,12 +893,10 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                   child: GestureDetector(
                     onHorizontalDragEnd: (details) {
                       if (_currentPage == 0 && (details.primaryVelocity ?? 0) > 0) {
-                        // On map, swiped right -> go to camera
                         _pageController.animateToPage(1,
                             duration: const Duration(milliseconds: 300),
                             curve: Curves.easeInOut);
                       } else if (_currentPage == 1 && (details.primaryVelocity ?? 0) < 0) {
-                        // On camera, swiped left -> go to map
                         _pageController.animateToPage(0,
                             duration: const Duration(milliseconds: 300),
                             curve: Curves.easeInOut);
@@ -1899,482 +925,417 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
 
   Widget _buildCameraView() {
     return Column(
-              children: [
-                // Top half: Camera preview with capture button
-                Expanded(
-                  flex: 1,
-                  child: Stack(
-                    fit: StackFit.expand,
+      children: [
+        // Top half: Camera preview with capture button
+        Expanded(
+          flex: 1,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              // Camera preview from current source
+              if (_currentSource?.isConnected == true)
+                _currentSource!.buildPreview(
+                  overlay: _showDepthOverlay ? _buildDepthOverlay() : null,
+                )
+              else if (_isLoading)
+                const Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      // Phone camera preview
-                      if (_usePhoneCamera && _cameraController != null && _cameraController!.value.isInitialized)
-                        Center(
-                          child: CameraPreview(_cameraController!),
-                        )
-                      // ESP32-CAM WiFi stream preview
-                      else if (_isConnectedToWifi && _currentFrame != null)
-                        Center(
-                          child: Image.memory(
-                            _currentFrame!,
-                            fit: BoxFit.contain,
-                            gaplessPlayback: true,
-                          ),
-                        )
-                      else if (_isConnectedToWifi)
-                        const Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              CircularProgressIndicator(color: Colors.white),
-                              SizedBox(height: 16),
-                              Text(
-                                'Waiting for ESP32-CAM WiFi stream...',
-                                style: TextStyle(color: Colors.white),
-                              ),
-                            ],
-                          ),
-                        )
-                      // SLP2 RTSP stream preview (media_kit)
-                      else if (_isConnectedToSlp2 && _slp2Service.videoController != null)
-                        Center(
-                          child: Video(
-                            controller: _slp2Service.videoController!,
-                          ),
-                        )
-                      // Native UDP H264 stream (low latency)
-                      else if (_useNativeUdp)
-                        H264VideoWidget(
-                          port: 5000,
-                          autoStart: true,
-                          onControllerCreated: (controller) {
-                            _h264Controller = controller;
-                          },
-                        )
-                      // Stereo simulation video
-                      else if (_useStereoSim && _stereoVideoSource.videoController != null)
-                        Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            Center(
-                              child: Video(
-                                controller: _stereoVideoSource.videoController!,
-                              ),
-                            ),
-                            // Depth map overlay on right half
-                            if (_showDepthOverlay)
-                              CustomPaint(
-                                painter: DepthMapPainter(
-                                  depthMapImage: _depthMapImage,
-                                  showOverlay: _showDepthOverlay,
-                                  opacity: 0.7,
-                                  showDivider: true,
-                                ),
-                                size: Size.infinite,
-                              ),
-                            // Depth processing indicator
-                            if (_showDepthOverlay)
-                              Positioned(
-                                right: 8,
-                                bottom: 8,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.black54,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if (_isProcessingDepth)
-                                        const SizedBox(
-                                          width: 12,
-                                          height: 12,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                          ),
-                                        ),
-                                      if (_isProcessingDepth) const SizedBox(width: 6),
-                                      Text(
-                                        '${_lastDepthProcessingTime.toStringAsFixed(0)}ms',
-                                        style: const TextStyle(color: Colors.white, fontSize: 12),
-                                      ),
-                                      if (_depthMapService.isUsingGpu) ...[
-                                        const SizedBox(width: 4),
-                                        const Icon(Icons.memory, size: 12, color: Colors.greenAccent),
-                                      ],
-                                    ],
-                                  ),
-                                ),
-                              ),
-                          ],
-                        )
-                      else if (_useStereoSim)
-                        const Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              CircularProgressIndicator(color: Colors.white),
-                              SizedBox(height: 16),
-                              Text(
-                                'Loading stereo simulation...',
-                                style: TextStyle(color: Colors.white),
-                              ),
-                            ],
-                          ),
-                        )
-                      else if (_isConnectedToSlp2)
-                        const Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              CircularProgressIndicator(color: Colors.white),
-                              SizedBox(height: 16),
-                              Text(
-                                'Connecting to SLP2 UDP stream...',
-                                style: TextStyle(color: Colors.white),
-                              ),
-                            ],
-                          ),
-                        )
-                      else if (_usePhoneCamera)
-                        const Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              CircularProgressIndicator(color: Colors.white),
-                              SizedBox(height: 16),
-                              Text(
-                                'Initializing phone camera...',
-                                style: TextStyle(color: Colors.white),
-                              ),
-                            ],
-                          ),
-                        )
-                      else
-                        Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              const Icon(
-                                Icons.camera_alt,
-                                color: Colors.white,
-                                size: 64,
-                              ),
-                              const SizedBox(height: 16),
-                              const Text(
-                                'No camera connected',
-                                style: TextStyle(color: Colors.white),
-                              ),
-                              const SizedBox(height: 8),
-                              ElevatedButton(
-                                onPressed: _showCameraSourceDialog,
-                                child: const Text('Select Camera'),
-                              ),
-                            ],
-                          ),
-                        ),
-
-                      // Status indicators (top right)
-                      Positioned(
-                        top: 40,
-                        right: 16,
-                        child: Column(
-                          children: [
-                            Icon(
-                              _serverAvailable ? Icons.check_circle : Icons.error,
-                              color: _serverAvailable ? Colors.green : Colors.red,
-                              size: 32,
-                            ),
-                            const SizedBox(height: 8),
-                            Icon(
-                              _isConnectedToWifi
-                                  ? Icons.wifi
-                                  : _isConnectedToSlp2
-                                      ? Icons.videocam
-                                      : _useNativeUdp
-                                          ? Icons.stream
-                                          : _usePhoneCamera
-                                              ? Icons.camera
-                                              : _useStereoSim
-                                                  ? Icons.threed_rotation
-                                                  : Icons.wifi_off,
-                              color: _isConnectedToWifi
-                                  ? Colors.blue
-                                  : _isConnectedToSlp2
-                                      ? Colors.purple
-                                      : _useNativeUdp
-                                          ? Colors.cyan
-                                          : _usePhoneCamera
-                                              ? Colors.green
-                                              : _useStereoSim
-                                                  ? Colors.orange
-                                                  : Colors.grey,
-                              size: 32,
-                            ),
-                            // Depth map toggle (only show when stereo sim is active)
-                            if (_useStereoSim) ...[
-                              const SizedBox(height: 8),
-                              GestureDetector(
-                                onTap: _toggleDepthOverlay,
-                                child: Container(
-                                  padding: const EdgeInsets.all(6),
-                                  decoration: BoxDecoration(
-                                    color: _showDepthOverlay ? Colors.green.withOpacity(0.8) : Colors.black54,
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: _showDepthOverlay
-                                        ? Border.all(color: Colors.greenAccent, width: 2)
-                                        : null,
-                                  ),
-                                  child: Icon(
-                                    Icons.layers,
-                                    color: _showDepthOverlay ? Colors.white : Colors.white70,
-                                    size: 28,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
+                      CircularProgressIndicator(color: Colors.white),
+                      SizedBox(height: 16),
+                      Text(
+                        'Connecting to camera...',
+                        style: TextStyle(color: Colors.white),
                       ),
-
-                      // Source and LLM selection dropdowns (top left)
-                      Positioned(
-                        top: 40,
-                        left: 16,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // Camera source dropdown
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(0.7),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  // Hardware key status icon
-                                  Icon(
-                                    _hardwareKeysActive ? Icons.keyboard : Icons.keyboard_outlined,
-                                    color: _hardwareKeysActive ? Colors.green : Colors.grey,
-                                    size: 20,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  // Source dropdown
-                                  DropdownButton<CameraSource>(
-                                    value: _selectedSource,
-                                    dropdownColor: Colors.grey[900],
-                                    underline: const SizedBox(),
-                                    icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
-                                    style: const TextStyle(color: Colors.white, fontSize: 14),
-                                    items: CameraSource.values.map((source) {
-                                      return DropdownMenuItem<CameraSource>(
-                                        value: source,
-                                        child: Text(source.label),
-                                      );
-                                    }).toList(),
-                                    onChanged: _isLoading ? null : (source) {
-                                      if (source != null) {
-                                        _switchSource(source);
-                                      }
-                                    },
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            // LLM provider dropdown
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(0.7),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: DropdownButton<LlmProvider>(
-                                value: _selectedLlmProvider,
-                                dropdownColor: Colors.grey[900],
-                                underline: const SizedBox(),
-                                icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
-                                style: const TextStyle(color: Colors.white, fontSize: 14),
-                                items: LlmProvider.values.map((provider) {
-                                  return DropdownMenuItem<LlmProvider>(
-                                    value: provider,
-                                    child: Text(_getLlmProviderLabel(provider)),
-                                  );
-                                }).toList(),
-                                onChanged: _isLoading ? null : (provider) {
-                                  if (provider != null) {
-                                    _switchLlmProvider(provider);
-                                  }
-                                },
-                              ),
-                            ),
-                          ],
-                        ),
+                    ],
+                  ),
+                )
+              else
+                Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        Icons.camera_alt,
+                        color: Colors.white,
+                        size: 64,
                       ),
-
-                      // Capture buttons (bottom center)
-                      Positioned(
-                        bottom: 20,
-                        left: 0,
-                        right: 0,
-                        child: Center(
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              // Describe button
-                              FloatingActionButton(
-                                onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
-                                    ? null
-                                    : _captureAndDescribe,
-                                backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
-                                    ? Colors.white
-                                    : Colors.grey,
-                                child: const Icon(
-                                  Icons.camera_alt,
-                                  color: Colors.black,
-                                  size: 32,
-                                ),
-                              ),
-                              const SizedBox(width: 16),
-                              // Extract text button
-                              FloatingActionButton(
-                                onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
-                                    ? null
-                                    : _captureAndExtractText,
-                                backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
-                                    ? Colors.white
-                                    : Colors.grey,
-                                child: const Icon(
-                                  Icons.text_fields,
-                                  color: Colors.black,
-                                  size: 32,
-                                ),
-                              ),
-                              const SizedBox(width: 16),
-                              // Face recognition button
-                              FloatingActionButton(
-                                onPressed: _isLoading || !_serverAvailable ||
-                                        (!_isConnectedToWifi && !_isConnectedToSlp2 && !_usePhoneCamera && !_useNativeUdp)
-                                    ? null
-                                    : _captureAndRecognizeFace,
-                                backgroundColor: _serverAvailable &&
-                                        (_isConnectedToWifi || _isConnectedToSlp2 || _usePhoneCamera || _useNativeUdp)
-                                    ? Colors.white
-                                    : Colors.grey,
-                                child: const Icon(
-                                  Icons.face,
-                                  color: Colors.black,
-                                  size: 32,
-                                ),
-                              ),
-                              const SizedBox(width: 16),
-                              // Repeat last description button
-                              FloatingActionButton(
-                                onPressed: _description.isEmpty
-                                    ? null
-                                    : () => _ttsService.speak(_description),
-                                backgroundColor: _description.isNotEmpty
-                                    ? Colors.white
-                                    : Colors.grey,
-                                child: const Icon(
-                                  Icons.replay,
-                                  color: Colors.black,
-                                  size: 32,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'No camera connected',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Select a source from the dropdown above',
+                        style: TextStyle(color: Colors.grey[400], fontSize: 12),
                       ),
                     ],
                   ),
                 ),
 
-                // Bottom half: Image preview (left) and description (right)
+              // Status indicators (top right)
+              Positioned(
+                top: 40,
+                right: 16,
+                child: Column(
+                  children: [
+                    Icon(
+                      _serverAvailable ? Icons.check_circle : Icons.error,
+                      color: _serverAvailable ? Colors.green : Colors.red,
+                      size: 32,
+                    ),
+                    const SizedBox(height: 8),
+                    Icon(
+                      _getSourceIcon(),
+                      color: _getSourceColor(),
+                      size: 32,
+                    ),
+                    // Depth map toggle (show for any connected source with depth service)
+                    if (_currentSource?.isConnected == true && _depthMapService.isInitialized) ...[
+                      const SizedBox(height: 8),
+                      GestureDetector(
+                        onTap: _toggleDepthOverlay,
+                        child: Container(
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            color: _showDepthOverlay ? Colors.green.withOpacity(0.8) : Colors.black54,
+                            borderRadius: BorderRadius.circular(8),
+                            border: _showDepthOverlay
+                                ? Border.all(color: Colors.greenAccent, width: 2)
+                                : null,
+                          ),
+                          child: Icon(
+                            Icons.layers,
+                            color: _showDepthOverlay ? Colors.white : Colors.white70,
+                            size: 28,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+
+              // Source and LLM selection dropdowns (top left)
+              Positioned(
+                top: 40,
+                left: 16,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Camera source dropdown
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.7),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Hardware key status icon
+                          Icon(
+                            _hardwareKeysActive ? Icons.keyboard : Icons.keyboard_outlined,
+                            color: _hardwareKeysActive ? Colors.green : Colors.grey,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          // Source dropdown
+                          DropdownButton<CameraSource>(
+                            value: _selectedSource,
+                            dropdownColor: Colors.grey[900],
+                            underline: const SizedBox(),
+                            icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+                            style: const TextStyle(color: Colors.white, fontSize: 14),
+                            items: CameraSource.values.map((source) {
+                              return DropdownMenuItem<CameraSource>(
+                                value: source,
+                                child: Text(source.label),
+                              );
+                            }).toList(),
+                            onChanged: _isLoading ? null : (source) {
+                              if (source != null) {
+                                _switchSource(source);
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    // LLM provider dropdown
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.7),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: DropdownButton<LlmProvider>(
+                        value: _selectedLlmProvider,
+                        dropdownColor: Colors.grey[900],
+                        underline: const SizedBox(),
+                        icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                        items: LlmProvider.values.map((provider) {
+                          return DropdownMenuItem<LlmProvider>(
+                            value: provider,
+                            child: Text(_getLlmProviderLabel(provider)),
+                          );
+                        }).toList(),
+                        onChanged: _isLoading ? null : (provider) {
+                          if (provider != null) {
+                            _switchLlmProvider(provider);
+                          }
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Capture buttons (bottom center)
+              Positioned(
+                bottom: 20,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Describe button
+                      FloatingActionButton(
+                        onPressed: _isLoading || !_serverAvailable || _currentSource?.isConnected != true
+                            ? null
+                            : _captureAndDescribe,
+                        backgroundColor: _serverAvailable && _currentSource?.isConnected == true
+                            ? Colors.white
+                            : Colors.grey,
+                        child: const Icon(
+                          Icons.camera_alt,
+                          color: Colors.black,
+                          size: 32,
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      // Extract text button
+                      FloatingActionButton(
+                        onPressed: _isLoading || !_serverAvailable || _currentSource?.isConnected != true
+                            ? null
+                            : _captureAndExtractText,
+                        backgroundColor: _serverAvailable && _currentSource?.isConnected == true
+                            ? Colors.white
+                            : Colors.grey,
+                        child: const Icon(
+                          Icons.text_fields,
+                          color: Colors.black,
+                          size: 32,
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      // Face recognition button
+                      FloatingActionButton(
+                        onPressed: _isLoading || !_serverAvailable || _currentSource?.isConnected != true
+                            ? null
+                            : _captureAndRecognizeFace,
+                        backgroundColor: _serverAvailable && _currentSource?.isConnected == true
+                            ? Colors.white
+                            : Colors.grey,
+                        child: const Icon(
+                          Icons.face,
+                          color: Colors.black,
+                          size: 32,
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      // Repeat last description button
+                      FloatingActionButton(
+                        onPressed: _description.isEmpty
+                            ? null
+                            : () => _ttsService.speak(_description),
+                        backgroundColor: _description.isNotEmpty
+                            ? Colors.white
+                            : Colors.grey,
+                        child: const Icon(
+                          Icons.replay,
+                          color: Colors.black,
+                          size: 32,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Bottom half: Image preview (left) and description (right)
+        Expanded(
+          flex: 1,
+          child: Container(
+            color: Colors.grey[900],
+            child: Row(
+              children: [
+                // Left: Image preview
                 Expanded(
                   flex: 1,
                   child: Container(
-                    color: Colors.grey[900],
-                    child: Row(
-                      children: [
-                        // Left: Image preview
-                        Expanded(
-                          flex: 1,
-                          child: Container(
-                            padding: const EdgeInsets.all(8.0),
-                            child: _capturedImage != null
-                                ? ClipRRect(
-                                    borderRadius: BorderRadius.circular(8),
-                                    child: Image.file(
-                                      _capturedImage!,
-                                      fit: BoxFit.contain,
-                                    ),
-                                  )
-                                : Center(
-                                    child: Icon(
-                                      Icons.image_outlined,
-                                      size: 64,
-                                      color: Colors.grey[700],
-                                    ),
-                                  ),
+                    padding: const EdgeInsets.all(8.0),
+                    child: _capturedImage != null
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.file(
+                              _capturedImage!,
+                              fit: BoxFit.contain,
+                            ),
+                          )
+                        : Center(
+                            child: Icon(
+                              Icons.image_outlined,
+                              size: 64,
+                              color: Colors.grey[700],
+                            ),
                           ),
-                        ),
+                  ),
+                ),
 
-                        // Right: Description
-                        Expanded(
-                          flex: 1,
-                          child: Container(
-                            padding: const EdgeInsets.all(16.0),
-                            child: _isLoading
-                                ? const Center(
-                                    child: Column(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
-                                      children: [
-                                        CircularProgressIndicator(
-                                            color: Colors.white),
-                                        SizedBox(height: 16),
-                                        Text(
-                                          'Analyzing...',
-                                          style: TextStyle(color: Colors.white),
-                                        ),
-                                      ],
-                                    ),
-                                  )
-                                : _description.isNotEmpty
-                                    ? SingleChildScrollView(
-                                        child: Text(
-                                          _description,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 14,
-                                          ),
-                                        ),
-                                      )
-                                    : Center(
-                                        child: Text(
-                                          'Tap the button to capture',
-                                          style: TextStyle(
-                                            color: Colors.grey[600],
-                                            fontSize: 14,
-                                          ),
-                                          textAlign: TextAlign.center,
-                                        ),
-                                      ),
-                          ),
-                        ),
-                      ],
-                    ),
+                // Right: Description
+                Expanded(
+                  flex: 1,
+                  child: Container(
+                    padding: const EdgeInsets.all(16.0),
+                    child: _isLoading
+                        ? const Center(
+                            child: Column(
+                              mainAxisAlignment:
+                                  MainAxisAlignment.center,
+                              children: [
+                                CircularProgressIndicator(
+                                    color: Colors.white),
+                                SizedBox(height: 16),
+                                Text(
+                                  'Analyzing...',
+                                  style: TextStyle(color: Colors.white),
+                                ),
+                              ],
+                            ),
+                          )
+                        : _description.isNotEmpty
+                            ? SingleChildScrollView(
+                                child: Text(
+                                  _description,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              )
+                            : Center(
+                                child: Text(
+                                  'Tap the button to capture',
+                                  style: TextStyle(
+                                    color: Colors.grey[600],
+                                    fontSize: 14,
+                                  ),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
                   ),
                 ),
               ],
-            );
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDepthOverlay() {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // Depth map overlay on right half
+        CustomPaint(
+          painter: DepthMapPainter(
+            depthMapImage: _depthMapImage,
+            showOverlay: _showDepthOverlay,
+            opacity: 0.7,
+            showDivider: true,
+          ),
+          size: Size.infinite,
+        ),
+        // Depth processing indicator
+        Positioned(
+          right: 8,
+          bottom: 8,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_isProcessingDepth)
+                  const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  ),
+                if (_isProcessingDepth) const SizedBox(width: 6),
+                Text(
+                  '${_lastDepthProcessingTime.toStringAsFixed(0)}ms',
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+                if (_depthMapService.isUsingGpu) ...[
+                  const SizedBox(width: 4),
+                  const Icon(Icons.memory, size: 12, color: Colors.greenAccent),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  IconData _getSourceIcon() {
+    if (_currentSource?.isConnected != true) return Icons.wifi_off;
+
+    switch (_selectedSource) {
+      case CameraSource.esp32:
+        return Icons.wifi;
+      case CameraSource.slp2Rtsp:
+        return Icons.videocam;
+      case CameraSource.slp2Udp:
+        return Icons.stream;
+      case CameraSource.phone:
+        return Icons.camera;
+      case CameraSource.stereoSim:
+        return Icons.threed_rotation;
+    }
+  }
+
+  Color _getSourceColor() {
+    if (_currentSource?.isConnected != true) return Colors.grey;
+
+    switch (_selectedSource) {
+      case CameraSource.esp32:
+        return Colors.blue;
+      case CameraSource.slp2Rtsp:
+        return Colors.purple;
+      case CameraSource.slp2Udp:
+        return Colors.cyan;
+      case CameraSource.phone:
+        return Colors.green;
+      case CameraSource.stereoSim:
+        return Colors.orange;
+    }
   }
 }
