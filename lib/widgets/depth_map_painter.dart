@@ -34,41 +34,27 @@ class DepthMapPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (!showOverlay || depthMapImage == null) {
-      // Still draw divider if enabled
       if (showDivider) {
         _drawDivider(canvas, size);
       }
       return;
     }
 
-    // Calculate right half region
-    final rightHalfRect = Rect.fromLTWH(
-      size.width / 2,  // Start at horizontal midpoint
-      0,
-      size.width / 2,  // Half width
-      size.height,
-    );
-
-    // Draw depth map scaled to right half with opacity
     final paint = Paint()
-      ..filterQuality = FilterQuality.medium
+      ..filterQuality = FilterQuality.low
       ..color = Color.fromRGBO(255, 255, 255, opacity);
 
-    canvas.save();
-    canvas.clipRect(rightHalfRect);
-
-    // Scale depth map to fill right half
+    // Draw depth map to fill the entire canvas (same as camera preview)
     final srcRect = Rect.fromLTWH(
       0,
       0,
       depthMapImage!.width.toDouble(),
       depthMapImage!.height.toDouble(),
     );
+    final destRect = Rect.fromLTWH(0, 0, size.width, size.height);
 
-    canvas.drawImageRect(depthMapImage!, srcRect, rightHalfRect, paint);
-    canvas.restore();
+    canvas.drawImageRect(depthMapImage!, srcRect, destRect, paint);
 
-    // Draw divider line between halves
     if (showDivider) {
       _drawDivider(canvas, size);
     }

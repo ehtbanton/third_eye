@@ -51,6 +51,9 @@ class DepthMapService {
   int _inputWidth = defaultInputWidth;
   int _inputHeight = defaultInputHeight;
 
+  // Output scale factor (1.0 = full resolution, 0.5 = half, etc.)
+  double _outputScale = 1.0;
+
   /// Whether the service is initialized
   bool get isInitialized => _isInitialized;
 
@@ -62,6 +65,12 @@ class DepthMapService {
 
   /// Model input height
   int get inputHeight => _inputHeight;
+
+  /// Output scale factor (1.0 = full resolution, 0.5 = half)
+  double get outputScale => _outputScale;
+  set outputScale(double value) {
+    _outputScale = value.clamp(0.25, 1.0);
+  }
 
   /// Initialize the depth map service with MiDaS model.
   ///
@@ -187,8 +196,6 @@ class DepthMapService {
         return null;
       }
 
-      debugPrint('DepthMapService: Input image size: ${image.width}x${image.height}');
-
       // Resize to model input size
       final resized = img.copyResize(image, width: _inputWidth, height: _inputHeight);
 
@@ -209,37 +216,42 @@ class DepthMapService {
         ),
       );
 
-      debugPrint('DepthMapService: Running inference...');
-
       // Run inference
       _interpreter!.run(input, output);
 
-      debugPrint('DepthMapService: Inference complete');
+      // Calculate output dimensions with downscaling
+      final outWidth = (_inputWidth * _outputScale).round();
+      final outHeight = (_inputHeight * _outputScale).round();
 
-      // Extract depth values
-      final depth = Float32List(_inputWidth * _inputHeight);
-      for (int y = 0; y < _inputHeight; y++) {
-        for (int x = 0; x < _inputWidth; x++) {
-          depth[y * _inputWidth + x] = output[0][y][x][0].toDouble();
+      // Extract and downsample depth values
+      final depth = Float32List(outWidth * outHeight);
+      final scaleX = _inputWidth / outWidth;
+      final scaleY = _inputHeight / outHeight;
+
+      for (int y = 0; y < outHeight; y++) {
+        for (int x = 0; x < outWidth; x++) {
+          final srcX = (x * scaleX).floor().clamp(0, _inputWidth - 1);
+          final srcY = (y * scaleY).floor().clamp(0, _inputHeight - 1);
+          depth[y * outWidth + x] = output[0][srcY][srcX][0].toDouble();
         }
       }
 
-      // Colorize with TURBO colormap
+      // Colorize with TURBO colormap at reduced resolution
       final colorized = TurboColormap.apply(
         depth.toList(),
-        _inputWidth,
-        _inputHeight,
+        outWidth,
+        outHeight,
       );
 
       stopwatch.stop();
 
-      debugPrint('DepthMapService: Processing complete in ${stopwatch.elapsedMilliseconds}ms');
+      debugPrint('DepthMapService: Processing complete in ${stopwatch.elapsedMilliseconds}ms (${outWidth}x$outHeight)');
 
       return DepthMapResult(
         rawDepth: depth,
         colorizedRgba: colorized,
-        width: _inputWidth,
-        height: _inputHeight,
+        width: outWidth,
+        height: outHeight,
         processingTimeMs: stopwatch.elapsedMilliseconds.toDouble(),
       );
     } catch (e, stack) {

@@ -1231,13 +1231,13 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     return Stack(
       fit: StackFit.expand,
       children: [
-        // Depth map overlay on right half
+        // Depth map overlay
         CustomPaint(
           painter: DepthMapPainter(
             depthMapImage: _depthMapImage,
             showOverlay: _showDepthOverlay,
             opacity: 0.7,
-            showDivider: true,
+            showDivider: false,
           ),
           size: Size.infinite,
         ),
