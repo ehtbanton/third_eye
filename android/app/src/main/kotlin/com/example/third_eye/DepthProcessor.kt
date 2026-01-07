@@ -62,24 +62,44 @@ object DepthProcessor {
         Imgproc.cvtColor(leftRgba, leftGray, Imgproc.COLOR_RGBA2GRAY)
         Imgproc.cvtColor(rightRgba, rightGray, Imgproc.COLOR_RGBA2GRAY)
 
+        val targetWidth = 640
+        if (leftGray.cols() > targetWidth) {
+            val scale = targetWidth.toDouble() / leftGray.cols().toDouble()
+            val newH = (leftGray.rows() * scale).toInt()
+            Imgproc.resize(
+                leftGray,
+                leftGray,
+                org.opencv.core.Size(targetWidth.toDouble(), newH.toDouble())
+            )
+            Imgproc.resize(
+                rightGray,
+                rightGray,
+                org.opencv.core.Size(targetWidth.toDouble(), newH.toDouble())
+            )
+        }
+
+        Imgproc.equalizeHist(leftGray, leftGray)
+        Imgproc.equalizeHist(rightGray, rightGray)
+
         val bs = if (blockSize % 2 == 1) blockSize else blockSize + 1
-        val nd = max(16, (numDisparities / 16) * 16)
+        val nd = max(16, ((numDisparities + 15) / 16) * 16)
 
         val stereo = StereoBM.create(nd, bs)
+
+        stereo.setPreFilterCap(31)
+        stereo.setUniquenessRatio(12)
+        stereo.setTextureThreshold(10)
+        stereo.setSpeckleWindowSize(100)
+        stereo.setSpeckleRange(32)
+        stereo.setDisp12MaxDiff(1)
 
         val disp16 = Mat()
         stereo.compute(leftGray, rightGray, disp16)
 
-        val cx = disp16.cols() / 2
-        val cy = disp16.rows() / 2
-        val raw = disp16.get(cy, cx)
-        val centerDisparity = if (raw != null && raw.isNotEmpty()) {
-            raw[0] / 16.0
-        } else null
-
         val disp8 = Mat()
-
         Core.normalize(disp16, disp8, 0.0, 255.0, Core.NORM_MINMAX, CvType.CV_8U)
+
+        Imgproc.medianBlur(disp8, disp8, 5)
 
         val colored = Mat()
         Imgproc.applyColorMap(disp8, colored, Imgproc.COLORMAP_TURBO)
