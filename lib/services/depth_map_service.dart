@@ -42,7 +42,7 @@ class DepthMapResult {
 class DepthMapService {
   Interpreter? _interpreter;
   bool _isInitialized = false;
-  bool _useGpuDelegate = false;
+  String _accelerator = 'cpu';
 
   // Model configuration (MiDaS v2.1 - 384x384 or auto-detected)
   static const int defaultInputWidth = 384;
@@ -57,8 +57,11 @@ class DepthMapService {
   /// Whether the service is initialized
   bool get isInitialized => _isInitialized;
 
-  /// Whether GPU delegate is enabled
-  bool get isUsingGpu => _useGpuDelegate;
+  /// Which accelerator is being used (nnapi, gpu, cpu)
+  String get accelerator => _accelerator;
+
+  /// Whether GPU delegate is enabled (legacy getter)
+  bool get isUsingGpu => _accelerator == 'gpu' || _accelerator == 'nnapi';
 
   /// Model input width
   int get inputWidth => _inputWidth;
@@ -75,7 +78,7 @@ class DepthMapService {
   /// Initialize the depth map service with MiDaS model.
   ///
   /// [modelPath] - Path to the TFLite model file in assets
-  /// [useGpuDelegate] - Whether to use GPU delegate for acceleration
+  /// [useGpuDelegate] - Whether to use hardware acceleration
   Future<void> initialize({
     String modelPath = 'assets/models/midas_v21_small_256.tflite',
     bool useGpuDelegate = true,
@@ -85,26 +88,23 @@ class DepthMapService {
     }
 
     debugPrint('DepthMapService: Initializing with model: $modelPath');
-    debugPrint('DepthMapService: GPU delegate requested: $useGpuDelegate');
 
-    // First, try with GPU delegate if requested
     if (useGpuDelegate) {
+      // Try GPU delegate (fastest for this model)
       try {
-        await _initializeWithOptions(modelPath, useGpu: true);
-        debugPrint('DepthMapService: Successfully initialized with GPU delegate');
+        await _initializeWithAccelerator(modelPath, accelerator: 'gpu');
+        debugPrint('DepthMapService: Successfully initialized with GPU');
         return;
       } catch (e) {
         debugPrint('DepthMapService: GPU initialization failed: $e');
-        debugPrint('DepthMapService: Falling back to CPU...');
-        // Clean up failed GPU attempt
         _interpreter?.close();
         _interpreter = null;
       }
     }
 
-    // Fall back to CPU-only mode
+    // Fall back to CPU
     try {
-      await _initializeWithOptions(modelPath, useGpu: false);
+      await _initializeWithAccelerator(modelPath, accelerator: 'cpu');
       debugPrint('DepthMapService: Successfully initialized with CPU');
     } catch (e, stack) {
       debugPrint('DepthMapService: CPU initialization also failed: $e');
@@ -114,23 +114,24 @@ class DepthMapService {
     }
   }
 
-  Future<void> _initializeWithOptions(String modelPath, {required bool useGpu}) async {
+  Future<void> _initializeWithAccelerator(String modelPath, {required String accelerator}) async {
     InterpreterOptions options = InterpreterOptions();
 
-    // Try to use GPU delegate for better performance
-    if (useGpu) {
-      try {
-        final gpuDelegate = GpuDelegateV2();
-        options.addDelegate(gpuDelegate);
-        _useGpuDelegate = true;
-        debugPrint('DepthMapService: GPU delegate added');
-      } catch (e) {
-        debugPrint('DepthMapService: GPU delegate not available: $e');
-        _useGpuDelegate = false;
-        rethrow;
-      }
+    if (accelerator == 'nnapi') {
+      // NNAPI - uses NPU/DSP on Android devices (Samsung NPU, Qualcomm DSP, etc.)
+      options.useNnApiForAndroid = true;
+      _accelerator = 'nnapi';
+      debugPrint('DepthMapService: NNAPI enabled for Android');
+    } else if (accelerator == 'gpu') {
+      final gpuDelegate = GpuDelegateV2();
+      options.addDelegate(gpuDelegate);
+      _accelerator = 'gpu';
+      debugPrint('DepthMapService: GPU delegate added');
     } else {
-      _useGpuDelegate = false;
+      // CPU with multiple threads
+      options.threads = 4;
+      _accelerator = 'cpu';
+      debugPrint('DepthMapService: Using CPU with 4 threads');
     }
 
     debugPrint('DepthMapService: Loading model from asset: $modelPath');
@@ -190,6 +191,7 @@ class DepthMapService {
     try {
       // Decode JPEG image
       final image = img.decodeImage(imageBytes);
+      final decodeTime = stopwatch.elapsedMilliseconds;
 
       if (image == null) {
         debugPrint('DepthMapService: Failed to decode input image');
@@ -198,26 +200,36 @@ class DepthMapService {
 
       // Resize to model input size
       final resized = img.copyResize(image, width: _inputWidth, height: _inputHeight);
+      final resizeTime = stopwatch.elapsedMilliseconds - decodeTime;
 
-      // Prepare input tensor: RGB image normalized to [0, 1]
-      // Shape: (1, H, W, 3)
-      final input = _prepareInput(resized);
-
-      // Prepare output tensor
-      // MiDaS output shape: (1, H, W, 1) - single channel depth with extra dim
-      final output = List.generate(
-        1, // batch
+      // Prepare input tensor
+      final input = List.generate(
+        1,
         (_) => List.generate(
           _inputHeight,
-          (_) => List.generate(
+          (y) => List.generate(
             _inputWidth,
-            (_) => List.filled(1, 0.0),
+            (x) {
+              final pixel = resized.getPixel(x, y);
+              return [pixel.r / 255.0, pixel.g / 255.0, pixel.b / 255.0];
+            },
           ),
+        ),
+      );
+      final prepTime = stopwatch.elapsedMilliseconds - resizeTime - decodeTime;
+
+      // Prepare output tensor
+      final output = List.generate(
+        1,
+        (_) => List.generate(
+          _inputHeight,
+          (_) => List.generate(_inputWidth, (_) => List.filled(1, 0.0)),
         ),
       );
 
       // Run inference
       _interpreter!.run(input, output);
+      final inferTime = stopwatch.elapsedMilliseconds - prepTime - resizeTime - decodeTime;
 
       // Calculate output dimensions with downscaling
       final outWidth = (_inputWidth * _outputScale).round();
@@ -244,8 +256,9 @@ class DepthMapService {
       );
 
       stopwatch.stop();
+      final colorTime = stopwatch.elapsedMilliseconds - inferTime - prepTime - resizeTime - decodeTime;
 
-      debugPrint('DepthMapService: Processing complete in ${stopwatch.elapsedMilliseconds}ms (${outWidth}x$outHeight)');
+      debugPrint('DepthMapService: ${stopwatch.elapsedMilliseconds}ms total [decode:$decodeTime resize:$resizeTime prep:$prepTime infer:$inferTime color:$colorTime] (${outWidth}x$outHeight) $_accelerator');
 
       return DepthMapResult(
         rawDepth: depth,
@@ -261,30 +274,6 @@ class DepthMapService {
     }
   }
 
-  /// Prepare input tensor from single RGB image.
-  ///
-  /// Normalizes to [0, 1] range
-  /// Shape: (1, H, W, 3)
-  List<List<List<List<double>>>> _prepareInput(img.Image image) {
-    return List.generate(
-      1, // batch
-      (_) => List.generate(
-        _inputHeight,
-        (y) => List.generate(
-          _inputWidth,
-          (x) {
-            final pixel = image.getPixel(x, y);
-            return [
-              pixel.r / 255.0,
-              pixel.g / 255.0,
-              pixel.b / 255.0,
-            ];
-          },
-        ),
-      ),
-    );
-  }
-
   /// Estimate depth from raw image bytes (convenience method).
   ///
   /// [imageBytes] - Image as JPEG bytes
@@ -298,7 +287,7 @@ class DepthMapService {
     _interpreter?.close();
     _interpreter = null;
     _isInitialized = false;
-    _useGpuDelegate = false;
+    _accelerator = 'cpu';
     debugPrint('DepthMapService: Disposed');
   }
 }

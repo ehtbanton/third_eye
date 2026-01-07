@@ -460,6 +460,8 @@ class StereoSimSource implements VideoSource {
     final success = await _source.initialize('asset://assets/videos/sample_stereo.mp4');
     if (success) {
       await _source.play();
+      // Slow down playback to ~3 FPS (assuming 30 FPS source video)
+      await _source.setRate(0.1);
       _initialized = true;
       // Wait for frames to be available
       await Future.delayed(const Duration(milliseconds: 500));
@@ -477,9 +479,8 @@ class StereoSimSource implements VideoSource {
 
   @override
   Future<Uint8List?> captureFrame() async {
-    // Capture stereo pair and return left image
-    final pair = await _source.captureStereoPair();
-    return pair?.leftImage;
+    // Use fast capture for depth processing (no stereo pair splitting)
+    return await _source.captureLeftFrameFast();
   }
 
   @override

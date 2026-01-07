@@ -436,8 +436,13 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     if (_isProcessingDepth || _currentSource?.isConnected != true) return;
     _isProcessingDepth = true;
 
+    final totalStopwatch = Stopwatch()..start();
+
     try {
+      final captureStart = totalStopwatch.elapsedMilliseconds;
       final frame = await _currentSource!.captureFrame();
+      final captureTime = totalStopwatch.elapsedMilliseconds - captureStart;
+
       if (frame == null) {
         _isProcessingDepth = false;
         return;
@@ -462,12 +467,17 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         return;
       }
 
-      // Convert colorized RGBA to ui.Image
+      // Convert colorized RGBA to ui.Image (no copy needed)
+      final convertStart = totalStopwatch.elapsedMilliseconds;
       final image = await DepthMapImageHelper.rgbaToImage(
-        result.colorizedRgba.toList(),
+        result.colorizedRgba,
         result.width,
         result.height,
       );
+      final convertTime = totalStopwatch.elapsedMilliseconds - convertStart;
+
+      totalStopwatch.stop();
+      debugPrint('Frame pipeline: ${totalStopwatch.elapsedMilliseconds}ms [capture:$captureTime infer:${result.processingTimeMs.round()} convert:$convertTime]');
 
       if (mounted) {
         setState(() {

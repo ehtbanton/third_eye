@@ -45,6 +45,11 @@ class StereoVideoSource implements StereoFrameSource {
   int _videoWidth = 0;
   int _videoHeight = 0;
 
+  // Cache for fast frame capture
+  Uint8List? _cachedScreenshot;
+  DateTime? _cachedScreenshotTime;
+  static const _cacheValidityMs = 50; // Cache valid for 50ms
+
   final _connectionStateController = StreamController<bool>.broadcast();
 
   /// Stream of connection/initialization state
@@ -164,6 +169,13 @@ class StereoVideoSource implements StereoFrameSource {
     }
   }
 
+  /// Set playback rate (1.0 = normal, 0.5 = half speed, etc.)
+  Future<void> setRate(double rate) async {
+    if (_player != null) {
+      await _player!.setRate(rate);
+    }
+  }
+
   /// Seek to a specific position.
   Future<void> seek(Duration position) async {
     if (_player != null) {
@@ -264,6 +276,50 @@ class StereoVideoSource implements StereoFrameSource {
       return null;
     }
     return await _player!.screenshot();
+  }
+
+  /// Fast capture of just the left half for depth processing.
+  /// Uses caching and minimal processing.
+  Future<Uint8List?> captureLeftFrameFast() async {
+    if (_player == null || !_isInitialized || !_isPlaying || !_hasFrames) {
+      return null;
+    }
+
+    try {
+      // Check cache
+      final now = DateTime.now();
+      if (_cachedScreenshot != null && _cachedScreenshotTime != null) {
+        final age = now.difference(_cachedScreenshotTime!).inMilliseconds;
+        if (age < _cacheValidityMs) {
+          return _cachedScreenshot;
+        }
+      }
+
+      // Get new screenshot (no retries for speed)
+      final screenshot = await _player!.screenshot();
+      if (screenshot == null || screenshot.isEmpty) {
+        return _cachedScreenshot; // Return stale cache if available
+      }
+
+      // Decode and crop left half only
+      final fullImage = img.decodeImage(screenshot);
+      if (fullImage == null) {
+        return _cachedScreenshot;
+      }
+
+      final halfWidth = fullImage.width ~/ 2;
+      final leftImage = img.copyCrop(fullImage, x: 0, y: 0, width: halfWidth, height: fullImage.height);
+      final leftJpeg = Uint8List.fromList(img.encodeJpg(leftImage, quality: 80)); // Lower quality for speed
+
+      // Update cache
+      _cachedScreenshot = leftJpeg;
+      _cachedScreenshotTime = now;
+
+      return leftJpeg;
+    } catch (e) {
+      debugPrint('StereoVideoSource: Fast capture failed: $e');
+      return _cachedScreenshot;
+    }
   }
 
   @override
