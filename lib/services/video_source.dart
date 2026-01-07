@@ -351,6 +351,7 @@ class Slp2UdpSource implements VideoSource {
   final Slp2StreamService _wifiService = Slp2StreamService();
   H264VideoController? _h264Controller;
   bool _isConnected = false;
+  bool _wifiConnectAttempted = false;
   final _connectionStateController = StreamController<bool>.broadcast();
   final int port;
 
@@ -360,31 +361,38 @@ class Slp2UdpSource implements VideoSource {
   CameraSource get sourceType => CameraSource.slp2Udp;
 
   @override
-  bool get isConnected => _isConnected;
+  bool get isConnected => _isConnected && _h264Controller != null;
 
   @override
   Stream<bool> get connectionStateStream => _connectionStateController.stream;
 
   H264VideoController? get h264Controller => _h264Controller;
 
-  void setController(H264VideoController controller) {
+  /// Called when the H264VideoWidget creates its controller and stream starts
+  void onStreamStarted(H264VideoController controller) {
     _h264Controller = controller;
+    _isConnected = true;
+    _connectionStateController.add(true);
+    debugPrint('Slp2UdpSource: Stream actually started');
   }
 
   @override
   Future<bool> connect(BuildContext context) async {
-    // Auto-connect to WiFi first
-    final connectionResult = await _wifiService.autoConnect();
-    final wifiConnected = connectionResult['wifi'] as bool;
-
-    if (!wifiConnected) {
-      debugPrint('Slp2UdpSource: WiFi auto-connect failed, continuing anyway...');
+    // Start WiFi connection in background - don't block
+    if (!_wifiConnectAttempted) {
+      _wifiConnectAttempted = true;
+      _wifiService.autoConnect().then((connectionResult) {
+        final wifiConnected = connectionResult['wifi'] as bool;
+        if (!wifiConnected) {
+          debugPrint('Slp2UdpSource: WiFi auto-connect failed');
+        } else {
+          debugPrint('Slp2UdpSource: WiFi connected');
+        }
+      });
     }
 
-    // The actual streaming is handled by the H264VideoWidget
-    // We just mark ourselves as connected
-    _isConnected = true;
-    _connectionStateController.add(true);
+    // Don't mark as connected yet - wait for onStreamStarted callback
+    // Return true to indicate we're ready to show the widget
     return true;
   }
 
@@ -414,7 +422,7 @@ class Slp2UdpSource implements VideoSource {
           port: port,
           autoStart: true,
           onControllerCreated: (controller) {
-            _h264Controller = controller;
+            onStreamStarted(controller);
             onControllerCreated?.call();
           },
         ),
@@ -433,15 +441,16 @@ class Slp2UdpSource implements VideoSource {
 class StereoSimSource implements VideoSource {
   final StereoVideoSource _source = StereoVideoSource();
   bool _initialized = false;
+  final _connectionStateController = StreamController<bool>.broadcast();
 
   @override
   CameraSource get sourceType => CameraSource.stereoSim;
 
   @override
-  bool get isConnected => _initialized && _source.hasFrames;
+  bool get isConnected => _initialized;
 
   @override
-  Stream<bool> get connectionStateStream => _source.connectionStateStream;
+  Stream<bool> get connectionStateStream => _connectionStateController.stream;
 
   VideoController? get videoController => _source.videoController;
   StereoVideoSource get source => _source;
@@ -454,6 +463,7 @@ class StereoSimSource implements VideoSource {
       _initialized = true;
       // Wait for frames to be available
       await Future.delayed(const Duration(milliseconds: 500));
+      _connectionStateController.add(true);
     }
     return success;
   }
@@ -461,6 +471,7 @@ class StereoSimSource implements VideoSource {
   @override
   Future<void> disconnect() async {
     _initialized = false;
+    _connectionStateController.add(false);
     await _source.dispose();
   }
 
@@ -497,6 +508,7 @@ class StereoSimSource implements VideoSource {
 
   void dispose() {
     disconnect();
+    _connectionStateController.close();
   }
 }
 

@@ -319,14 +319,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   Future<void> _switchSource(CameraSource source) async {
     if (_selectedSource == source && _currentSource != null) return;
 
-    setState(() {
-      _isLoading = true;
-    });
-
     // Stop depth processing
     _stopDepthProcessing();
     setState(() {
       _showDepthOverlay = false;
+      _selectedSource = source;
     });
 
     // Disconnect from current source
@@ -336,37 +333,28 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     // Create new source
     _currentSource = VideoSourceFactory.create(source);
 
-    // Listen to connection state
+    // Listen to connection state changes
     _sourceConnectionSubscription = _currentSource!.connectionStateStream.listen((connected) {
-      if (mounted && !connected && _currentSource?.isConnected == true) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('${source.label} disconnected'),
-            backgroundColor: Colors.orange,
-          ),
-        );
+      if (mounted) {
+        setState(() {}); // Trigger rebuild to update UI
+        if (connected) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${source.label} connected'),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
       }
     });
 
-    // Connect to new source
-    final success = await _currentSource!.connect(context);
+    // Update UI immediately to show the source widget
+    setState(() {});
 
-    if (mounted) {
-      setState(() {
-        _selectedSource = source;
-        _isLoading = false;
-      });
-
-      if (success) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('${source.label} connected'),
-            backgroundColor: Colors.green,
-            duration: const Duration(seconds: 2),
-          ),
-        );
-        _ttsService.speak('${source.label} connected');
-      } else {
+    // Start connection in background - don't block UI
+    _currentSource!.connect(context).then((success) {
+      if (mounted && !success) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Failed to connect to ${source.label}'),
@@ -374,7 +362,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
           ),
         );
       }
-    }
+    });
   }
 
   /// Switch to a different LLM provider
@@ -933,23 +921,10 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
             fit: StackFit.expand,
             children: [
               // Camera preview from current source
-              if (_currentSource?.isConnected == true)
+              // Show the widget even while connecting - the widget handles its own loading state
+              if (_currentSource != null)
                 _currentSource!.buildPreview(
-                  overlay: _showDepthOverlay ? _buildDepthOverlay() : null,
-                )
-              else if (_isLoading)
-                const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CircularProgressIndicator(color: Colors.white),
-                      SizedBox(height: 16),
-                      Text(
-                        'Connecting to camera...',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                    ],
-                  ),
+                  overlay: _showDepthOverlay && _currentSource!.isConnected ? _buildDepthOverlay() : null,
                 )
               else
                 Center(
