@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:image/image.dart' as img;
 import 'esp32_wifi_service.dart';
 import 'slp2_stream_service.dart';
 import 'stereo_video_source.dart';
@@ -41,6 +42,13 @@ abstract class VideoSource {
 
   /// Capture a single frame as JPEG bytes
   Future<Uint8List?> captureFrame();
+
+  /// Capture a stereo pair from SBS sources (returns null for mono sources).
+  /// Override in stereo-capable sources to split SBS frame into left/right.
+  Future<StereoFramePair?> captureStereoPair() async => null;
+
+  /// Whether this source provides stereo (SBS) frames
+  bool get isStereoSource => false;
 
   /// Build the preview widget for this source
   Widget buildPreview({
@@ -386,6 +394,7 @@ class Slp2RtspSource implements VideoSource {
 }
 
 /// SLP2 Native UDP H264 source (low latency)
+/// Receives side-by-side (SBS) stereo frames from StereoPi
 class Slp2UdpSource implements VideoSource {
   final Slp2StreamService _wifiService = Slp2StreamService();
   H264VideoController? _h264Controller;
@@ -395,6 +404,9 @@ class Slp2UdpSource implements VideoSource {
   final int port;
 
   Slp2UdpSource({this.port = 5000});
+
+  @override
+  bool get isStereoSource => true; // SLP2 sends SBS stereo frames
 
   @override
   CameraSource get sourceType => CameraSource.slp2Udp;
@@ -471,6 +483,44 @@ class Slp2UdpSource implements VideoSource {
       return null;
     }
     return await _h264Controller!.captureFrame();
+  }
+
+  /// Capture and split SBS frame into left/right stereo pair
+  @override
+  Future<StereoFramePair?> captureStereoPair() async {
+    final frame = await captureFrame();
+    if (frame == null) return null;
+
+    try {
+      // Decode SBS frame
+      final fullImage = img.decodeImage(frame);
+      if (fullImage == null) {
+        debugPrint('Slp2UdpSource: Failed to decode SBS frame');
+        return null;
+      }
+
+      final fullWidth = fullImage.width;
+      final fullHeight = fullImage.height;
+      final halfWidth = fullWidth ~/ 2;
+
+      // Split at midpoint: left half = left camera, right half = right camera
+      final leftImage = img.copyCrop(fullImage, x: 0, y: 0, width: halfWidth, height: fullHeight);
+      final rightImage = img.copyCrop(fullImage, x: halfWidth, y: 0, width: halfWidth, height: fullHeight);
+
+      // Encode back to JPEG
+      final leftJpeg = Uint8List.fromList(img.encodeJpg(leftImage, quality: 85));
+      final rightJpeg = Uint8List.fromList(img.encodeJpg(rightImage, quality: 85));
+
+      return StereoFramePair(
+        leftImage: leftJpeg,
+        rightImage: rightJpeg,
+        width: halfWidth,
+        height: fullHeight,
+      );
+    } catch (e) {
+      debugPrint('Slp2UdpSource: Failed to split SBS frame: $e');
+      return null;
+    }
   }
 
   @override

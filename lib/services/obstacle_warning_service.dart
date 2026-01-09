@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'depth_map_service.dart';
+import 'metric_depth_service.dart';
 import '../models/detected_object.dart';
 import 'tts_service.dart';
 
@@ -65,18 +66,20 @@ enum ProximityLevel {
 }
 
 extension ProximityLevelExtension on ProximityLevel {
-  bool get requiresWarning => this != ProximityLevel.far;
+  /// Only warn for obstacles < 1 meter (touching level)
+  bool get requiresWarning => this == ProximityLevel.touching;
 
-  bool get isCritical => this == ProximityLevel.touching || this == ProximityLevel.veryClose;
+  /// Only touching (< 1m) is considered critical
+  bool get isCritical => this == ProximityLevel.touching;
 
   String get prefix {
     switch (this) {
       case ProximityLevel.touching:
         return 'Stop!';
       case ProximityLevel.veryClose:
-        return 'Warning!';
+        return ''; // No warning spoken for 1-2m
       case ProximityLevel.close:
-        return 'Caution,';
+        return ''; // No warning spoken for 2-4m
       case ProximityLevel.moderate:
         return '';
       case ProximityLevel.far:
@@ -90,7 +93,8 @@ class SpatialObstacle {
   final ObstacleSector sector;
   final ProximityLevel proximity;
   final String? objectName; // From YOLO, null if unknown
-  final double normalizedDepth; // 0.0 = far, 1.0 = touching
+  final double normalizedDepth; // 0.0 = far, 1.0 = touching (relative mode)
+  final double? distanceMeters; // Actual distance in meters (metric mode)
   final double confidence;
 
   SpatialObstacle({
@@ -98,22 +102,37 @@ class SpatialObstacle {
     required this.proximity,
     this.objectName,
     required this.normalizedDepth,
+    this.distanceMeters,
     this.confidence = 1.0,
   });
 
+  /// Human-friendly announcement of the obstacle.
+  /// Includes distance in meters when available (metric mode).
   String get announcement {
     final prefix = proximity.prefix;
     final name = objectName ?? 'obstacle';
     final position = sector.announcement;
 
-    if (prefix.isNotEmpty) {
-      return '$prefix $name $position';
+    // Include distance if we have metric depth
+    String distanceStr = '';
+    if (distanceMeters != null && distanceMeters! < 10) {
+      final meters = distanceMeters!;
+      if (meters < 1) {
+        distanceStr = ' ${(meters * 100).round()} centimeters';
+      } else {
+        distanceStr = ' ${meters.toStringAsFixed(1)} meters';
+      }
     }
-    return '$name $position';
+
+    if (prefix.isNotEmpty) {
+      return '$prefix $name$distanceStr $position';
+    }
+    return '$name$distanceStr $position';
   }
 
   @override
-  String toString() => 'SpatialObstacle($objectName @ $sector, $proximity, depth=$normalizedDepth)';
+  String toString() => 'SpatialObstacle($objectName @ $sector, $proximity, '
+      'depth=$normalizedDepth${distanceMeters != null ? ", ${distanceMeters!.toStringAsFixed(2)}m" : ""})';
 }
 
 /// Result of obstacle analysis
@@ -121,13 +140,17 @@ class ObstacleAnalysisResult {
   final List<SpatialObstacle> obstacles;
   final bool pathBlocked;
   final String? suggestedAction;
-  final List<double> sectorDepths; // Min depth per sector (7 values)
+  final List<double> sectorDepths; // Closest depth per sector (7 values)
+  final List<double>? sectorDistancesMeters; // Metric distances per sector (null if uncalibrated)
+  final bool isMetricCalibrated; // Whether depths are in real meters
 
   ObstacleAnalysisResult({
     required this.obstacles,
     required this.pathBlocked,
     this.suggestedAction,
     required this.sectorDepths,
+    this.sectorDistancesMeters,
+    this.isMetricCalibrated = false,
   });
 }
 
@@ -138,6 +161,7 @@ class ObstacleAnalysisResult {
 /// - Divides view into 7 angular sectors
 /// - Combines with YOLO to identify obstacle types
 /// - Manages warning cooldowns to avoid spam
+/// - Supports both relative (MiDaS) and metric (calibrated) depth modes
 class ObstacleWarningService {
   final TtsService _ttsService;
 
@@ -146,12 +170,19 @@ class ObstacleWarningService {
   static const double fovDegrees = 120.0; // Assumed horizontal FOV
   static const double groundPlaneRatio = 0.7; // Use bottom 70% to avoid sky
 
-  // Depth thresholds (relative to max scene depth)
-  // Higher value = closer (MiDaS inverse depth)
+  // Relative depth thresholds (for uncalibrated MiDaS)
+  // Higher value = closer (MiDaS inverse depth, normalized 0-1)
   static const double touchingThreshold = 0.92;
   static const double veryCloseThreshold = 0.80;
   static const double closeThreshold = 0.65;
   static const double moderateThreshold = 0.50;
+
+  // Metric distance thresholds (in meters, for calibrated depth)
+  // Lower value = closer
+  static const double touchingDistanceM = 1.0;    // < 1m - STOP!
+  static const double veryCloseDistanceM = 2.0;   // 1-2m - Warning
+  static const double closeDistanceM = 4.0;       // 2-4m - Caution
+  static const double moderateDistanceM = 6.0;    // 4-6m - Info
 
   // Warning cooldowns per sector to avoid spam
   final Map<ObstacleSector, DateTime> _lastWarningTime = {};
@@ -266,6 +297,182 @@ class ObstacleWarningService {
       suggestedAction: suggestedAction,
       sectorDepths: sectorDepths,
     );
+  }
+
+  /// Analyze metric depth map and detections to find obstacles.
+  ///
+  /// This method uses calibrated metric depth in meters for accurate
+  /// distance-based warnings. Falls back to relative mode if uncalibrated.
+  ObstacleAnalysisResult analyzeMetricFrame({
+    required MetricDepthResult depthResult,
+    List<DetectedObject>? detections,
+  }) {
+    // If not calibrated, fall back to relative depth analysis
+    if (!depthResult.isCalibrated) {
+      // Create a DepthMapResult from the MiDaS data for backward compatibility
+      final depthMap = DepthMapResult(
+        rawDepth: depthResult.midasDepth,
+        colorizedRgba: depthResult.colorizedRgba,
+        width: depthResult.width,
+        height: depthResult.height,
+        processingTimeMs: depthResult.processingTimeMs,
+      );
+      return analyzeFrame(depthMap: depthMap, detections: detections);
+    }
+
+    if (depthResult.metricDepth.isEmpty) {
+      return ObstacleAnalysisResult(
+        obstacles: [],
+        pathBlocked: false,
+        sectorDepths: List.filled(numSectors, 0.0),
+        isMetricCalibrated: true,
+      );
+    }
+
+    // 1. Squash depth map vertically - get minimum (closest) metric depth per column
+    //    Only consider ground plane (bottom portion of image)
+    final columnDistances = _squashMetricDepthVertically(depthResult);
+
+    // 2. Aggregate columns into sectors (get minimum distance per sector)
+    final sectorDistances = _aggregateMetricIntoSectors(columnDistances);
+
+    // 3. Determine proximity level per sector based on metric distance
+    final sectorProximities = sectorDistances.map(_distanceToProximity).toList();
+
+    // 4. Create obstacles from sectors with close objects
+    final obstacles = <SpatialObstacle>[];
+    for (int i = 0; i < numSectors; i++) {
+      final sector = ObstacleSector.values[i];
+      final proximity = sectorProximities[i];
+
+      if (proximity.requiresWarning) {
+        // Try to find a YOLO detection in this sector
+        String? objectName;
+        double confidence = 1.0;
+
+        if (detections != null && detections.isNotEmpty) {
+          final detection = _findDetectionInSector(detections, sector);
+          if (detection != null) {
+            objectName = detection.className;
+            confidence = detection.confidence;
+          }
+        }
+
+        // Convert distance to normalized depth for compatibility (inverse relationship)
+        // Closer = higher normalized depth
+        final normalizedDepth = sectorDistances[i] > 0
+            ? (1.0 - (sectorDistances[i] / moderateDistanceM)).clamp(0.0, 1.0)
+            : 1.0;
+
+        obstacles.add(SpatialObstacle(
+          sector: sector,
+          proximity: proximity,
+          objectName: objectName,
+          normalizedDepth: normalizedDepth,
+          distanceMeters: sectorDistances[i],
+          confidence: confidence,
+        ));
+      }
+    }
+
+    // Sort by distance (closest first)
+    obstacles.sort((a, b) => (a.distanceMeters ?? double.infinity)
+        .compareTo(b.distanceMeters ?? double.infinity));
+
+    // 5. Check if center path is blocked
+    final centerProximity = sectorProximities[3]; // Center sector
+    final centerLeftProximity = sectorProximities[2];
+    final centerRightProximity = sectorProximities[4];
+
+    final pathBlocked = centerProximity == ProximityLevel.touching ||
+        (centerProximity == ProximityLevel.veryClose &&
+         centerLeftProximity.isCritical &&
+         centerRightProximity.isCritical);
+
+    // 6. Suggest action based on which direction has more clearance
+    String? suggestedAction;
+    if (pathBlocked) {
+      // Find direction with furthest obstacles (more clearance)
+      final leftClearance = (sectorDistances[0] + sectorDistances[1]) / 2;
+      final rightClearance = (sectorDistances[5] + sectorDistances[6]) / 2;
+
+      if (leftClearance > rightClearance + 0.5) {
+        suggestedAction = 'Move left';
+      } else if (rightClearance > leftClearance + 0.5) {
+        suggestedAction = 'Move right';
+      } else {
+        suggestedAction = 'Stop and assess';
+      }
+    }
+
+    return ObstacleAnalysisResult(
+      obstacles: obstacles,
+      pathBlocked: pathBlocked,
+      suggestedAction: suggestedAction,
+      sectorDepths: sectorDistances, // In metric mode, these are distances
+      sectorDistancesMeters: sectorDistances,
+      isMetricCalibrated: true,
+    );
+  }
+
+  /// Squash metric depth map vertically, returning minimum (closest) distance per column
+  List<double> _squashMetricDepthVertically(MetricDepthResult depthResult) {
+    final numColumns = depthResult.width;
+    final columnDistances = List<double>.filled(numColumns, double.infinity);
+
+    // Only look at ground plane (bottom portion)
+    final startY = (depthResult.height * (1 - groundPlaneRatio)).round();
+
+    for (int x = 0; x < numColumns; x++) {
+      double minDistance = double.infinity;
+
+      for (int y = startY; y < depthResult.height; y += 2) { // Skip every other row for speed
+        final idx = y * depthResult.width + x;
+        if (idx < depthResult.metricDepth.length) {
+          final distance = depthResult.metricDepth[idx];
+          if (distance > 0 && distance < minDistance) {
+            minDistance = distance;
+          }
+        }
+      }
+
+      columnDistances[x] = minDistance;
+    }
+
+    return columnDistances;
+  }
+
+  /// Aggregate column distances into sector distances (minimum per sector)
+  List<double> _aggregateMetricIntoSectors(List<double> columnDistances) {
+    final numColumns = columnDistances.length;
+    final sectorDistances = List<double>.filled(numSectors, double.infinity);
+
+    final sectorBoundaries = [0.0, 0.12, 0.27, 0.42, 0.58, 0.73, 0.88, 1.0];
+
+    for (int s = 0; s < numSectors; s++) {
+      final startCol = (sectorBoundaries[s] * numColumns).round();
+      final endCol = (sectorBoundaries[s + 1] * numColumns).round();
+
+      double minSectorDistance = double.infinity;
+      for (int c = startCol; c < endCol && c < numColumns; c++) {
+        if (columnDistances[c] < minSectorDistance) {
+          minSectorDistance = columnDistances[c];
+        }
+      }
+
+      sectorDistances[s] = minSectorDistance;
+    }
+
+    return sectorDistances;
+  }
+
+  /// Convert metric distance to proximity level
+  ProximityLevel _distanceToProximity(double distanceMeters) {
+    if (distanceMeters <= touchingDistanceM) return ProximityLevel.touching;
+    if (distanceMeters <= veryCloseDistanceM) return ProximityLevel.veryClose;
+    if (distanceMeters <= closeDistanceM) return ProximityLevel.close;
+    if (distanceMeters <= moderateDistanceM) return ProximityLevel.moderate;
+    return ProximityLevel.far;
   }
 
   /// Squash depth map vertically, returning max (closest) depth per column

@@ -15,9 +15,10 @@ import '../services/azure_maps_service.dart';
 import '../services/navigation_guidance_service.dart';
 import '../services/heading_service.dart';
 import '../services/video_source.dart';
-import '../services/depth_map_service.dart';
+import '../services/metric_depth_service.dart';
 import '../services/object_detection_service.dart';
 import '../services/obstacle_warning_service.dart';
+import '../services/turbo_colormap.dart';
 import '../widgets/depth_map_painter.dart';
 import '../widgets/object_detection_painter.dart';
 import '../models/detected_object.dart';
@@ -114,14 +115,18 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   // LLM provider selection
   LlmProvider _selectedLlmProvider = LlmProvider.gemini;
 
-  // Depth map overlay
-  final DepthMapService _depthMapService = DepthMapService();
+  // Depth map overlay - using MetricDepthService for calibrated stereo depth
+  // Configured for StereoPi with Pi Camera v2 modules (65mm baseline, 3.04mm focal length)
+  // Focal length in pixels auto-configures based on actual stream resolution
+  final MetricDepthService _metricDepthService = MetricDepthService();
   bool _showDepthOverlay = false;
   ui.Image? _depthMapImage;
   Uint8List? _cameraFrameForDepth; // Camera frame to display behind depth map
   bool _isProcessingDepth = false;
   Timer? _depthProcessingTimer;
   double _lastDepthProcessingTime = 0;
+  bool _isMetricCalibrated = false;
+  static const double _maxDepthDisplayM = 6.0; // Max distance for visualization
 
   // Object detection overlay
   final ObjectDetectionService _objectDetectionService = ObjectDetectionService();
@@ -136,7 +141,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   Timer? _obstacleWarningTimer;
   bool _isProcessingObstacleWarning = false;
   ObstacleAnalysisResult? _lastObstacleAnalysis;
-  DepthMapResult? _lastDepthResult; // Cached for obstacle analysis
+  MetricDepthResult? _lastMetricDepthResult; // Cached for obstacle analysis
 
   @override
   void initState() {
@@ -234,12 +239,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         }
       });
 
-      // Initialize depth map service
+      // Initialize metric depth service (MiDaS + stereo calibration)
       try {
-        await _depthMapService.initialize();
-        debugPrint('Depth map service initialized');
+        await _metricDepthService.initialize();
+        debugPrint('Metric depth service initialized');
       } catch (e) {
-        debugPrint('WARNING: Depth map service failed to initialize: $e');
+        debugPrint('WARNING: Metric depth service failed to initialize: $e');
       }
 
       // Initialize object detection service
@@ -514,8 +519,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   /// Start depth map processing loop
   void _startDepthProcessing() {
     if (_depthProcessingTimer != null) return;
-    if (!_depthMapService.isInitialized) {
-      debugPrint('Depth map service not initialized - cannot start processing');
+    if (!_metricDepthService.isInitialized) {
+      debugPrint('Metric depth service not initialized - cannot start processing');
       return;
     }
     if (_currentSource?.isConnected != true) {
@@ -593,12 +598,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       debugPrint('ObstacleWarning: No video source connected');
       return;
     }
-    if (!_depthMapService.isInitialized) {
-      debugPrint('ObstacleWarning: Depth map service not initialized');
+    if (!_metricDepthService.isInitialized) {
+      debugPrint('ObstacleWarning: Metric depth service not initialized');
       return;
     }
 
-    debugPrint('Starting obstacle warning processing');
+    debugPrint('Starting obstacle warning processing (metric mode)');
     _obstacleWarningService!.reset();
 
     // Process at ~3 FPS for obstacle warnings (balance between responsiveness and performance)
@@ -616,37 +621,51 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     debugPrint('Stopped obstacle warning processing');
   }
 
-  /// Process a frame for obstacle warnings
+  /// Process a frame for obstacle warnings using metric depth
+  /// Uses stereo pairs for calibration when source provides SBS frames
   Future<void> _processObstacleWarningFrame() async {
     if (_isProcessingObstacleWarning || _currentSource?.isConnected != true) return;
-    if (_obstacleWarningService == null || !_depthMapService.isInitialized) return;
+    if (_obstacleWarningService == null || !_metricDepthService.isInitialized) return;
 
     _isProcessingObstacleWarning = true;
 
     try {
-      // Capture frame
-      final frame = await _currentSource!.captureFrame();
-      if (frame == null) {
+      MetricDepthResult? metricResult;
+      Uint8List? frameForDetection;
+
+      // Check if source provides stereo frames
+      if (_currentSource!.isStereoSource) {
+        final stereoPair = await _currentSource!.captureStereoPair();
+        if (stereoPair == null) {
+          _isProcessingObstacleWarning = false;
+          return;
+        }
+        frameForDetection = stereoPair.leftImage;
+        metricResult = await _metricDepthService.estimateDepth(stereoPair);
+      } else {
+        final frame = await _currentSource!.captureFrame();
+        if (frame == null) {
+          _isProcessingObstacleWarning = false;
+          return;
+        }
+        frameForDetection = frame;
+        metricResult = await _metricDepthService.estimateDepthFromImage(frame);
+      }
+
+      if (metricResult == null) {
         _isProcessingObstacleWarning = false;
         return;
       }
 
-      // Run depth estimation
-      final depthResult = await _depthMapService.estimateDepthFromImage(frame);
-      if (depthResult == null) {
-        _isProcessingObstacleWarning = false;
-        return;
-      }
-
-      _lastDepthResult = depthResult;
+      _lastMetricDepthResult = metricResult;
 
       // Optionally run YOLO detection for object identification
       List<DetectedObject>? detections;
-      if (_objectDetectionService.isInitialized) {
-        final decoded = img.decodeJpg(frame);
+      if (_objectDetectionService.isInitialized && frameForDetection != null) {
+        final decoded = img.decodeJpg(frameForDetection);
         if (decoded != null) {
           final detectionResult = await _objectDetectionService.detectObjects(
-            frame,
+            frameForDetection,
             imageWidth: decoded.width,
             imageHeight: decoded.height,
           );
@@ -654,9 +673,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         }
       }
 
-      // Analyze obstacles
-      final analysis = _obstacleWarningService!.analyzeFrame(
-        depthMap: depthResult,
+      // Analyze obstacles using metric depth
+      final analysis = _obstacleWarningService!.analyzeMetricFrame(
+        depthResult: metricResult,
         detections: detections,
       );
 
@@ -667,7 +686,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
 
       // Log for debugging
       if (analysis.obstacles.isNotEmpty) {
-        debugPrint('ObstacleWarning: Found ${analysis.obstacles.length} obstacles');
+        debugPrint('ObstacleWarning: Found ${analysis.obstacles.length} obstacles (metric: ${metricResult.isCalibrated})');
         for (final obstacle in analysis.obstacles) {
           debugPrint('  - $obstacle');
         }
@@ -729,7 +748,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     }
   }
 
-  /// Process a single depth frame
+  /// Process a single depth frame using metric depth service
+  /// Uses stereo pairs for calibration when source provides SBS frames
   Future<void> _processDepthFrame() async {
     if (_isProcessingDepth || _currentSource?.isConnected != true) return;
     _isProcessingDepth = true;
@@ -737,51 +757,91 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     final totalStopwatch = Stopwatch()..start();
 
     try {
+      if (!_metricDepthService.isInitialized) {
+        _isProcessingDepth = false;
+        return;
+      }
+
       final captureStart = totalStopwatch.elapsedMilliseconds;
-      final frame = await _currentSource!.captureFrame();
+
+      MetricDepthResult? result;
+      Uint8List? displayFrame;
+
+      // Check if source provides stereo frames (e.g., SLP2 UDP with SBS)
+      if (_currentSource!.isStereoSource) {
+        // Capture stereo pair and use full metric depth estimation with calibration
+        final stereoPair = await _currentSource!.captureStereoPair();
+        if (stereoPair == null) {
+          _isProcessingDepth = false;
+          return;
+        }
+        displayFrame = stereoPair.leftImage; // Display left image
+        result = await _metricDepthService.estimateDepth(stereoPair);
+      } else {
+        // Mono source - use single image estimation (no stereo calibration)
+        final frame = await _currentSource!.captureFrame();
+        if (frame == null) {
+          _isProcessingDepth = false;
+          return;
+        }
+        displayFrame = frame;
+        result = await _metricDepthService.estimateDepthFromImage(frame);
+      }
+
       final captureTime = totalStopwatch.elapsedMilliseconds - captureStart;
 
-      if (frame == null) {
-        _isProcessingDepth = false;
-        return;
-      }
-
-      if (!_depthMapService.isInitialized) {
-        _isProcessingDepth = false;
-        return;
-      }
-
-      final result = await _depthMapService.estimateDepthFromImage(frame);
       if (result == null) {
         _isProcessingDepth = false;
         return;
       }
 
+      // Create metric-colored visualization
+      // If calibrated: use fixed scale (0-6m) so colors have consistent meaning
+      // If not calibrated: fall back to relative colorization
+      final Uint8List colorizedRgba;
+      if (result.isCalibrated) {
+        // Use metric colormap with fixed scale
+        colorizedRgba = TurboColormap.applyMetric(
+          result.metricDepth.toList(),
+          result.width,
+          result.height,
+          maxDistanceM: _maxDepthDisplayM,
+        );
+      } else {
+        // Fall back to MiDaS colorization (relative)
+        colorizedRgba = result.colorizedRgba;
+      }
+
       // Validate RGBA data
       final expectedSize = result.width * result.height * 4;
-      if (result.colorizedRgba.length != expectedSize) {
-        debugPrint('RGBA size mismatch! Got ${result.colorizedRgba.length}, expected $expectedSize');
+      if (colorizedRgba.length != expectedSize) {
+        debugPrint('RGBA size mismatch! Got ${colorizedRgba.length}, expected $expectedSize');
         _isProcessingDepth = false;
         return;
       }
 
-      // Convert colorized RGBA to ui.Image (no copy needed)
+      // Convert colorized RGBA to ui.Image
       final convertStart = totalStopwatch.elapsedMilliseconds;
       final image = await DepthMapImageHelper.rgbaToImage(
-        result.colorizedRgba,
+        colorizedRgba,
         result.width,
         result.height,
       );
       final convertTime = totalStopwatch.elapsedMilliseconds - convertStart;
 
       totalStopwatch.stop();
-      debugPrint('Frame pipeline: ${totalStopwatch.elapsedMilliseconds}ms [capture:$captureTime infer:${result.processingTimeMs.round()} convert:$convertTime]');
+      final calibStatus = result.isCalibrated ? 'METRIC' : 'relative';
+      final calibInfo = result.calibration != null
+          ? ' s=${result.calibration!.scale.toStringAsFixed(3)} t=${result.calibration!.shift.toStringAsFixed(3)}'
+          : '';
+      debugPrint('Depth: ${totalStopwatch.elapsedMilliseconds}ms [cap:$captureTime inf:${result.processingTimeMs.round()} cvt:$convertTime] $calibStatus$calibInfo');
 
       if (mounted) {
         setState(() {
           _depthMapImage = image;
-          _cameraFrameForDepth = frame; // Store camera frame for display
-          _lastDepthProcessingTime = result.processingTimeMs;
+          _cameraFrameForDepth = displayFrame;
+          _lastDepthProcessingTime = result!.processingTimeMs;
+          _isMetricCalibrated = result.isCalibrated;
         });
       }
     } catch (e, stack) {
@@ -1108,7 +1168,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     _navigationService.dispose();
     _locationService.dispose();
     _pageController.dispose();
-    _depthMapService.dispose();
+    _metricDepthService.dispose();
     _stopDepthProcessing();
     _objectDetectionService.dispose();
     _stopDetectionProcessing();
@@ -1291,8 +1351,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                       color: _getSourceColor(),
                       size: 32,
                     ),
-                    // Depth map toggle (show for any connected source with depth service)
-                    if (_currentSource?.isConnected == true && _depthMapService.isInitialized) ...[
+                    // Depth map toggle (show for any connected source with metric depth service)
+                    if (_currentSource?.isConnected == true && _metricDepthService.isInitialized) ...[
                       const SizedBox(height: 8),
                       GestureDetector(
                         onTap: _toggleDepthOverlay,
@@ -1585,19 +1645,22 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
               fit: BoxFit.contain,
               gaplessPlayback: true,
             ),
-          // Depth map overlay on top
+          // Depth map overlay on top with metric scale
           CustomPaint(
             painter: DepthMapPainter(
               depthMapImage: _depthMapImage,
               showOverlay: _showDepthOverlay,
               opacity: 0.7,
               showDivider: false,
+              showScale: true,
+              maxDistanceM: _maxDepthDisplayM,
+              isMetricCalibrated: _isMetricCalibrated,
             ),
             size: Size.infinite,
             isComplex: true,
             willChange: true,
           ),
-          // Depth processing indicator
+          // Depth processing indicator with calibration status
           Positioned(
             right: 8,
             bottom: 8,
@@ -1624,10 +1687,22 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                     '${_lastDepthProcessingTime.toStringAsFixed(0)}ms',
                     style: const TextStyle(color: Colors.white, fontSize: 12),
                   ),
-                  if (_depthMapService.isUsingGpu) ...[
-                    const SizedBox(width: 4),
-                    const Icon(Icons.memory, size: 12, color: Colors.greenAccent),
-                  ],
+                  const SizedBox(width: 4),
+                  // Calibration status indicator
+                  Icon(
+                    _isMetricCalibrated ? Icons.check_circle : Icons.warning,
+                    size: 12,
+                    color: _isMetricCalibrated ? Colors.greenAccent : Colors.orangeAccent,
+                  ),
+                  const SizedBox(width: 2),
+                  Text(
+                    _isMetricCalibrated ? 'M' : 'R',
+                    style: TextStyle(
+                      color: _isMetricCalibrated ? Colors.greenAccent : Colors.orangeAccent,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ],
               ),
             ),

@@ -136,4 +136,67 @@ class TurboColormap {
     int idx = (normalizedValue * 255).clamp(0, 255).toInt();
     return _turboLUT[idx];
   }
+
+  /// Apply TURBO colormap to metric depth values with a fixed scale.
+  ///
+  /// [metricDepth] - List of depth values in meters
+  /// [width] - Image width
+  /// [height] - Image height
+  /// [maxDistanceM] - Maximum distance for the scale (values beyond are clamped)
+  /// Returns RGBA bytes (length = width * height * 4)
+  ///
+  /// Color mapping: Close (red) -> Mid (yellow/green) -> Far (blue)
+  /// This is inverted from disparity to make intuitive sense for depth.
+  static Uint8List applyMetric(
+    List<double> metricDepth,
+    int width,
+    int height, {
+    double maxDistanceM = 6.0,
+  }) {
+    if (metricDepth.isEmpty) {
+      return Uint8List(0);
+    }
+
+    final output = Uint8List(width * height * 4);
+
+    for (int i = 0; i < metricDepth.length && i < width * height; i++) {
+      final depth = metricDepth[i];
+
+      // Handle invalid depths (infinity, NaN, negative)
+      if (depth.isInfinite || depth.isNaN || depth <= 0) {
+        // Dark gray for invalid/unknown
+        output[i * 4 + 0] = 40;
+        output[i * 4 + 1] = 40;
+        output[i * 4 + 2] = 40;
+        output[i * 4 + 3] = 255;
+        continue;
+      }
+
+      // Normalize to 0-1 range (0 = closest, 1 = farthest)
+      // Then invert so close = high index (red), far = low index (blue)
+      double normalized = (depth / maxDistanceM).clamp(0.0, 1.0);
+      int idx = ((1.0 - normalized) * 255).clamp(0, 255).toInt();
+
+      final color = _turboLUT[idx];
+
+      output[i * 4 + 0] = color[0];
+      output[i * 4 + 1] = color[1];
+      output[i * 4 + 2] = color[2];
+      output[i * 4 + 3] = 255;
+    }
+
+    return output;
+  }
+
+  /// Get the color for a specific metric depth value.
+  ///
+  /// Returns [R, G, B] values for the given depth.
+  static List<int> getMetricColor(double depthMeters, {double maxDistanceM = 6.0}) {
+    if (depthMeters.isInfinite || depthMeters.isNaN || depthMeters <= 0) {
+      return [40, 40, 40]; // Dark gray for invalid
+    }
+    double normalized = (depthMeters / maxDistanceM).clamp(0.0, 1.0);
+    int idx = ((1.0 - normalized) * 255).clamp(0, 255).toInt();
+    return _turboLUT[idx];
+  }
 }
