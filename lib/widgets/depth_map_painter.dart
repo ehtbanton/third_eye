@@ -44,14 +44,35 @@ class DepthMapPainter extends CustomPainter {
       ..filterQuality = FilterQuality.low
       ..color = Color.fromRGBO(255, 255, 255, opacity);
 
-    // Draw depth map to fill the entire canvas (same as camera preview)
+    // Source rectangle (full depth map image)
     final srcRect = Rect.fromLTWH(
       0,
       0,
       depthMapImage!.width.toDouble(),
       depthMapImage!.height.toDouble(),
     );
-    final destRect = Rect.fromLTWH(0, 0, size.width, size.height);
+
+    // Calculate destination rectangle with BoxFit.contain logic
+    // to match the camera frame's aspect ratio
+    final imageAspect = depthMapImage!.width / depthMapImage!.height;
+    final canvasAspect = size.width / size.height;
+
+    double destWidth, destHeight, destX, destY;
+    if (canvasAspect > imageAspect) {
+      // Canvas is wider - fit to height, center horizontally
+      destHeight = size.height;
+      destWidth = destHeight * imageAspect;
+      destX = (size.width - destWidth) / 2;
+      destY = 0;
+    } else {
+      // Canvas is taller - fit to width, center vertically
+      destWidth = size.width;
+      destHeight = destWidth / imageAspect;
+      destX = 0;
+      destY = (size.height - destHeight) / 2;
+    }
+
+    final destRect = Rect.fromLTWH(destX, destY, destWidth, destHeight);
 
     canvas.drawImageRect(depthMapImage!, srcRect, destRect, paint);
 

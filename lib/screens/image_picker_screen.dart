@@ -66,6 +66,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   final DepthMapService _depthMapService = DepthMapService();
   bool _showDepthOverlay = false;
   ui.Image? _depthMapImage;
+  Uint8List? _cameraFrameForDepth; // Camera frame to display behind depth map
   bool _isProcessingDepth = false;
   Timer? _depthProcessingTimer;
   double _lastDepthProcessingTime = 0;
@@ -482,6 +483,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       if (mounted) {
         setState(() {
           _depthMapImage = image;
+          _cameraFrameForDepth = frame; // Store camera frame for display
           _lastDepthProcessingTime = result.processingTimeMs;
         });
       }
@@ -1238,55 +1240,66 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   }
 
   Widget _buildDepthOverlay() {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        // Depth map overlay
-        CustomPaint(
-          painter: DepthMapPainter(
-            depthMapImage: _depthMapImage,
-            showOverlay: _showDepthOverlay,
-            opacity: 0.7,
-            showDivider: false,
-          ),
-          size: Size.infinite,
-        ),
-        // Depth processing indicator
-        Positioned(
-          right: 8,
-          bottom: 8,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: Colors.black54,
-              borderRadius: BorderRadius.circular(4),
+    return RepaintBoundary(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Camera frame as background (same frame used for depth calculation)
+          if (_cameraFrameForDepth != null)
+            Image.memory(
+              _cameraFrameForDepth!,
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
             ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_isProcessingDepth)
-                  const SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+          // Depth map overlay on top
+          CustomPaint(
+            painter: DepthMapPainter(
+              depthMapImage: _depthMapImage,
+              showOverlay: _showDepthOverlay,
+              opacity: 0.7,
+              showDivider: false,
+            ),
+            size: Size.infinite,
+            isComplex: true,
+            willChange: true,
+          ),
+          // Depth processing indicator
+          Positioned(
+            right: 8,
+            bottom: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_isProcessingDepth)
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
                     ),
+                  if (_isProcessingDepth) const SizedBox(width: 6),
+                  Text(
+                    '${_lastDepthProcessingTime.toStringAsFixed(0)}ms',
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
                   ),
-                if (_isProcessingDepth) const SizedBox(width: 6),
-                Text(
-                  '${_lastDepthProcessingTime.toStringAsFixed(0)}ms',
-                  style: const TextStyle(color: Colors.white, fontSize: 12),
-                ),
-                if (_depthMapService.isUsingGpu) ...[
-                  const SizedBox(width: 4),
-                  const Icon(Icons.memory, size: 12, color: Colors.greenAccent),
+                  if (_depthMapService.isUsingGpu) ...[
+                    const SizedBox(width: 4),
+                    const Icon(Icons.memory, size: 12, color: Colors.greenAccent),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 

@@ -498,11 +498,17 @@ class StereoSimSource implements VideoSource {
       );
     }
 
+    // When overlay is present (depth mode), the overlay contains both
+    // the camera frame and depth map, so just return it directly
+    if (overlay != null) {
+      return overlay;
+    }
+
+    // Normal mode: show full side-by-side stereo video
     return Stack(
       fit: StackFit.expand,
       children: [
         Center(child: Video(controller: _source.videoController!)),
-        if (overlay != null) overlay,
       ],
     );
   }
