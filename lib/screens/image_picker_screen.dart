@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import '../services/llama_service.dart';
@@ -536,7 +537,18 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         return;
       }
 
-      final result = await _objectDetectionService.detectObjects(frame);
+      // Decode JPEG to get actual dimensions
+      final decoded = img.decodeJpg(frame);
+      if (decoded == null) {
+        _isProcessingDetection = false;
+        return;
+      }
+
+      final result = await _objectDetectionService.detectObjects(
+        frame,
+        imageWidth: decoded.width,
+        imageHeight: decoded.height,
+      );
       if (result == null) {
         _isProcessingDetection = false;
         return;

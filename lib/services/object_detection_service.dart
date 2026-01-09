@@ -107,9 +107,9 @@ class ObjectDetectionService {
         bytesList: imageBytes,
         imageHeight: imageHeight,
         imageWidth: imageWidth,
-        iouThreshold: 0.4,
-        confThreshold: 0.4,
-        classThreshold: 0.5,
+        iouThreshold: 0.45,
+        confThreshold: 0.25,
+        classThreshold: 0.25,
       );
 
       stopwatch.stop();
