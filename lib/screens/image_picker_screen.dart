@@ -236,7 +236,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
 
       // Initialize depth map service
       try {
-        await _depthMapService.initialize();
+        await _depthMapService.initialize(
+          modelPath: 'assets/models/hitnet_middlebury_480x640.tflite',
+          useGpuDelegate: false,
+        );
+
       // Placeholder value for focal length in pixels xyz    --------->           v CHANGE THIS THING
       _depthMapService.setStereoCalibration(baselineMeters: 0.065, focalLengthPx: 700.0);
 
