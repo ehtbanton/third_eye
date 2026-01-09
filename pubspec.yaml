@@ -92,6 +92,9 @@ dependencies:
   # GPS location
   geolocator: ^14.0.2
 
+  # Compass/magnetometer for heading
+  flutter_compass: ^0.8.0
+
   # YOLO object detection
   flutter_vision: ^2.0.0
 

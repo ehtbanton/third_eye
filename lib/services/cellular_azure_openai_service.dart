@@ -242,6 +242,64 @@ class CellularAzureOpenAIService {
     return await _cellularHttp.isCellularAvailable();
   }
 
+  /// Analyze navigation scene for blind navigation assistance
+  /// Returns a brief, actionable description focused on safety
+  Future<String> analyzeNavigationScene(String imagePath) async {
+    print('analyzeNavigationScene called with: $imagePath');
+
+    if (!_isInitialized || _apiKey == null) {
+      throw Exception('Service not initialized. Call initialize() first.');
+    }
+
+    await _ensureCellularAvailable();
+
+    try {
+      // Read image file and encode as base64
+      final imageFile = File(imagePath);
+      if (!await imageFile.exists()) {
+        throw Exception('Image file not found: $imagePath');
+      }
+
+      final imageBytes = await imageFile.readAsBytes();
+      final base64Image = base64Encode(imageBytes);
+
+      // Navigation-specific prompt
+      final requestBody = {
+        'messages': [
+          {
+            'role': 'system',
+            'content': 'You are assisting a blind person navigating outdoors. '
+                'Provide brief, actionable guidance. Focus on: '
+                '1) Immediate path ahead (clear, obstructed, turns) '
+                '2) Hazards (stairs, curbs, vehicles, holes) '
+                '3) Useful landmarks (crosswalks, doors, signs). '
+                'Keep response under 20 words. Be direct and safety-focused.'
+          },
+          {
+            'role': 'user',
+            'content': [
+              {'type': 'text', 'text': 'Describe what I need to know to walk safely.'},
+              {
+                'type': 'image_url',
+                'image_url': {
+                  'url': 'data:image/jpeg;base64,$base64Image',
+                }
+              }
+            ]
+          }
+        ],
+        'max_tokens': 100,
+        'temperature': 0.2,
+      };
+
+      final result = await _makeRequest(requestBody);
+      return result.isNotEmpty ? result : 'Unable to analyze scene';
+    } catch (e) {
+      print('ERROR in analyzeNavigationScene: $e');
+      return 'Scene analysis unavailable';
+    }
+  }
+
   /// Dispose of resources
   Future<void> dispose() async {
     await _cellularHttp.release();

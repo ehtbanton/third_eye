@@ -13,6 +13,7 @@ import '../services/foreground_service.dart';
 import '../services/location_service.dart';
 import '../services/azure_maps_service.dart';
 import '../services/navigation_guidance_service.dart';
+import '../services/heading_service.dart';
 import '../services/video_source.dart';
 import '../services/depth_map_service.dart';
 import '../services/object_detection_service.dart';
@@ -38,6 +39,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   final ForegroundService _foregroundService = ForegroundService();
   final LocationService _locationService = LocationService();
   final AzureMapsService _azureMapsService = AzureMapsService();
+  final HeadingService _headingService = HeadingService();
   late final NavigationGuidanceService _navigationService;
   StreamSubscription<Map<String, dynamic>>? _foregroundTriggerSubscription;
   bool _backgroundServiceRunning = false;
@@ -154,10 +156,14 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       final success = await _llamaService.initialize();
       await _ttsService.initialize();
 
+      // Initialize heading service
+      await _headingService.initialize();
+
       // Initialize navigation guidance service
       _navigationService = NavigationGuidanceService(
         ttsService: _ttsService,
         locationService: _locationService,
+        headingService: _headingService,
       );
 
       // Initialize map services (async, non-blocking)
@@ -943,6 +949,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     _llamaService.dispose();
     _ttsService.dispose();
     _faceRecognitionService.dispose();
+    _headingService.dispose();
     _navigationService.dispose();
     _locationService.dispose();
     _pageController.dispose();

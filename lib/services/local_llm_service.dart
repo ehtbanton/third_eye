@@ -11,7 +11,7 @@ class LocalLlmService {
   final CellularAzureOpenAIService _azureOpenAI = CellularAzureOpenAIService();
   final CellularGeminiService _gemini = CellularGeminiService();
 
-  LlmProvider _currentProvider = LlmProvider.gemini;
+  LlmProvider _currentProvider = LlmProvider.azureOpenAI;
   bool _azureInitialized = false;
   bool _geminiInitialized = false;
 
@@ -65,10 +65,10 @@ class LocalLlmService {
     }
   }
 
-  /// Initialize the default LLM provider (Gemini)
+  /// Initialize the default LLM provider (Azure OpenAI)
   Future<bool> initialize(String modelPath, String mmprojPath) async {
-    // Initialize the default provider (Gemini)
-    return await _initializeGemini();
+    // Initialize the default provider (Azure OpenAI)
+    return await _initializeAzure();
   }
 
   /// Generate a description for an image using the selected provider
