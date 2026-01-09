@@ -50,10 +50,24 @@ android {
         doNotStrip "*/x86/*.so"
         doNotStrip "*/x86_64/*.so"
     }
+
+    // Required for TFLite models (flutter_vision)
+    aaptOptions {
+        noCompress 'tflite'
+        noCompress 'lite'
+    }
 }
 
 flutter {
     source = "../.."
+}
+
+configurations.all {
+    // Resolve TensorFlow Lite / LiteRT duplicate class conflict
+    // Exclude old tensorflow-lite in favor of newer litert
+    exclude group: 'org.tensorflow', module: 'tensorflow-lite'
+    exclude group: 'org.tensorflow', module: 'tensorflow-lite-api'
+    exclude group: 'org.tensorflow', module: 'tensorflow-lite-gpu'
 }
 
 dependencies {

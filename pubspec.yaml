@@ -92,6 +92,9 @@ dependencies:
   # GPS location
   geolocator: ^14.0.2
 
+  # YOLO object detection
+  flutter_vision: ^2.0.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

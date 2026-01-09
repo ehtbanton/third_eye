@@ -14,7 +14,10 @@ import '../services/azure_maps_service.dart';
 import '../services/navigation_guidance_service.dart';
 import '../services/video_source.dart';
 import '../services/depth_map_service.dart';
+import '../services/object_detection_service.dart';
 import '../widgets/depth_map_painter.dart';
+import '../widgets/object_detection_painter.dart';
+import '../models/detected_object.dart';
 import '../models/route_info.dart';
 import 'map_screen.dart';
 import 'dart:ui' as ui;
@@ -71,6 +74,14 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   Timer? _depthProcessingTimer;
   double _lastDepthProcessingTime = 0;
 
+  // Object detection overlay
+  final ObjectDetectionService _objectDetectionService = ObjectDetectionService();
+  bool _showObjectDetection = false;
+  List<DetectedObject>? _detectedObjects;
+  bool _isProcessingDetection = false;
+  Timer? _detectionProcessingTimer;
+  double _lastDetectionProcessingTime = 0;
+
   @override
   void initState() {
     super.initState();
@@ -90,7 +101,10 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
 
   Future<void> _handleAppResumed() async {
     debugPrint('App resumed - reconnecting to stream');
-    // Sources handle their own reconnection
+    // Reconnect the current video source (important for UDP streaming)
+    if (_currentSource != null) {
+      await _currentSource!.reconnect();
+    }
   }
 
   Future<void> _initializeServices() async {
@@ -163,6 +177,23 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         debugPrint('Depth map service initialized');
       } catch (e) {
         debugPrint('WARNING: Depth map service failed to initialize: $e');
+      }
+
+      // Initialize object detection service
+      try {
+        await _objectDetectionService.initialize();
+        debugPrint('Object detection service initialized');
+      } catch (e) {
+        debugPrint('WARNING: Object detection service failed to initialize: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Object detection unavailable: Missing YOLOv8 model. See assets/models/README.md'),
+              duration: Duration(seconds: 8),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
       }
 
       // Setup hardware key listener for Bluetooth clickers and volume buttons
@@ -320,10 +351,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   Future<void> _switchSource(CameraSource source) async {
     if (_selectedSource == source && _currentSource != null) return;
 
-    // Stop depth processing
+    // Stop depth and detection processing
     _stopDepthProcessing();
+    _stopDetectionProcessing();
     setState(() {
       _showDepthOverlay = false;
+      _showObjectDetection = false;
       _selectedSource = source;
     });
 
@@ -396,6 +429,14 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
 
   /// Toggle depth map overlay
   void _toggleDepthOverlay() {
+    // Disable object detection when enabling depth overlay
+    if (!_showDepthOverlay && _showObjectDetection) {
+      _stopDetectionProcessing();
+      setState(() {
+        _showObjectDetection = false;
+      });
+    }
+
     setState(() {
       _showDepthOverlay = !_showDepthOverlay;
     });
@@ -430,6 +471,89 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   void _stopDepthProcessing() {
     _depthProcessingTimer?.cancel();
     _depthProcessingTimer = null;
+  }
+
+  /// Toggle object detection overlay
+  void _toggleObjectDetection() {
+    // Disable depth overlay when enabling object detection
+    if (!_showObjectDetection && _showDepthOverlay) {
+      _stopDepthProcessing();
+      setState(() {
+        _showDepthOverlay = false;
+      });
+    }
+
+    setState(() {
+      _showObjectDetection = !_showObjectDetection;
+    });
+
+    if (_showObjectDetection) {
+      _startDetectionProcessing();
+    } else {
+      _stopDetectionProcessing();
+    }
+  }
+
+  /// Start object detection processing loop
+  void _startDetectionProcessing() {
+    if (_detectionProcessingTimer != null) return;
+    if (!_objectDetectionService.isInitialized) {
+      debugPrint('Object detection service not initialized - cannot start processing');
+      return;
+    }
+    if (_currentSource?.isConnected != true) {
+      debugPrint('No source connected - cannot start detection processing');
+      return;
+    }
+
+    debugPrint('Starting object detection processing timer');
+    _detectionProcessingTimer = Timer.periodic(
+      const Duration(milliseconds: 50), // ~20 FPS target
+      (_) => _processDetectionFrame(),
+    );
+  }
+
+  /// Stop object detection processing
+  void _stopDetectionProcessing() {
+    _detectionProcessingTimer?.cancel();
+    _detectionProcessingTimer = null;
+  }
+
+  /// Process a single detection frame
+  Future<void> _processDetectionFrame() async {
+    if (_isProcessingDetection || _currentSource?.isConnected != true) return;
+    _isProcessingDetection = true;
+
+    try {
+      final frame = await _currentSource!.captureFrame();
+      if (frame == null) {
+        _isProcessingDetection = false;
+        return;
+      }
+
+      if (!_objectDetectionService.isInitialized) {
+        _isProcessingDetection = false;
+        return;
+      }
+
+      final result = await _objectDetectionService.detectObjects(frame);
+      if (result == null) {
+        _isProcessingDetection = false;
+        return;
+      }
+
+      if (mounted) {
+        setState(() {
+          _detectedObjects = result.detections;
+          _lastDetectionProcessingTime = result.processingTimeMs;
+        });
+      }
+    } catch (e, stack) {
+      debugPrint('Detection processing error: $e');
+      debugPrint('Stack: $stack');
+    } finally {
+      _isProcessingDetection = false;
+    }
   }
 
   /// Process a single depth frame
@@ -812,6 +936,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     _pageController.dispose();
     _depthMapService.dispose();
     _stopDepthProcessing();
+    _objectDetectionService.dispose();
+    _stopDetectionProcessing();
     super.dispose();
   }
 
@@ -936,7 +1062,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
               // Show the widget even while connecting - the widget handles its own loading state
               if (_currentSource != null)
                 _currentSource!.buildPreview(
-                  overlay: _showDepthOverlay && _currentSource!.isConnected ? _buildDepthOverlay() : null,
+                  overlay: _currentSource!.isConnected ? _buildCameraOverlay() : null,
                 )
               else
                 Center(
@@ -996,6 +1122,28 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                           child: Icon(
                             Icons.layers,
                             color: _showDepthOverlay ? Colors.white : Colors.white70,
+                            size: 28,
+                          ),
+                        ),
+                      ),
+                    ],
+                    // Object detection toggle (show for any connected source with detection service)
+                    if (_currentSource?.isConnected == true && _objectDetectionService.isInitialized) ...[
+                      const SizedBox(height: 8),
+                      GestureDetector(
+                        onTap: _toggleObjectDetection,
+                        child: Container(
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            color: _showObjectDetection ? Colors.orange.withOpacity(0.8) : Colors.black54,
+                            borderRadius: BorderRadius.circular(8),
+                            border: _showObjectDetection
+                                ? Border.all(color: Colors.orangeAccent, width: 2)
+                                : null,
+                          ),
+                          child: Icon(
+                            Icons.view_in_ar,
+                            color: _showObjectDetection ? Colors.white : Colors.white70,
                             size: 28,
                           ),
                         ),
@@ -1293,6 +1441,69 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                   if (_depthMapService.isUsingGpu) ...[
                     const SizedBox(width: 4),
                     const Icon(Icons.memory, size: 12, color: Colors.greenAccent),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Build the appropriate camera overlay based on current mode
+  Widget? _buildCameraOverlay() {
+    if (_showDepthOverlay) {
+      return _buildDepthOverlay();
+    } else if (_showObjectDetection) {
+      return _buildObjectDetectionOverlay();
+    }
+    return null;
+  }
+
+  Widget _buildObjectDetectionOverlay() {
+    return RepaintBoundary(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Object detection overlay
+          CustomPaint(
+            painter: ObjectDetectionPainter(
+              detections: _detectedObjects,
+              showOverlay: _showObjectDetection,
+            ),
+            size: Size.infinite,
+          ),
+          // Detection processing indicator
+          Positioned(
+            right: 8,
+            bottom: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_isProcessingDetection)
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
+                    ),
+                  if (_isProcessingDetection) const SizedBox(width: 6),
+                  Text(
+                    '${_lastDetectionProcessingTime.toStringAsFixed(0)}ms',
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                  ),
+                  if (_objectDetectionService.accelerator == 'gpu') ...[
+                    const SizedBox(width: 4),
+                    const Icon(Icons.memory, size: 12, color: Colors.orangeAccent),
                   ],
                 ],
               ),

@@ -36,6 +36,9 @@ abstract class VideoSource {
   /// Disconnect/dispose the source
   Future<void> disconnect();
 
+  /// Reconnect after app resume (e.g., when surface was destroyed while backgrounded)
+  Future<void> reconnect();
+
   /// Capture a single frame as JPEG bytes
   Future<Uint8List?> captureFrame();
 
@@ -109,6 +112,21 @@ class PhoneCameraSource implements VideoSource {
     await _controller?.dispose();
     _controller = null;
     debugPrint('PhoneCameraSource: Disconnected');
+  }
+
+  @override
+  Future<void> reconnect() async {
+    // Phone camera doesn't need special reconnection - Flutter handles it
+    if (_controller != null && !_controller!.value.isInitialized) {
+      try {
+        await _controller!.initialize();
+        _isConnected = true;
+        _connectionStateController.add(true);
+        debugPrint('PhoneCameraSource: Reconnected');
+      } catch (e) {
+        debugPrint('PhoneCameraSource: Reconnect failed: $e');
+      }
+    }
   }
 
   @override
@@ -191,6 +209,21 @@ class Esp32Source implements VideoSource {
     _frameSubscription = null;
     _currentFrame = null;
     await _service.disconnect();
+  }
+
+  @override
+  Future<void> reconnect() async {
+    // ESP32 uses HTTP streaming which should auto-reconnect
+    if (!_service.isConnected) {
+      debugPrint('Esp32Source: Reconnecting...');
+      final success = await _service.connect(esp32Ip: '192.168.4.1');
+      if (success) {
+        _frameSubscription = _service.imageStream.listen((frame) {
+          _currentFrame = frame;
+        });
+        debugPrint('Esp32Source: Reconnected');
+      }
+    }
   }
 
   @override
@@ -313,6 +346,12 @@ class Slp2RtspSource implements VideoSource {
   }
 
   @override
+  Future<void> reconnect() async {
+    // RTSP stream should auto-reconnect via media_kit
+    debugPrint('Slp2RtspSource: Reconnect requested (media_kit handles this)');
+  }
+
+  @override
   Future<Uint8List?> captureFrame() async {
     return await _service.captureFrame();
   }
@@ -406,6 +445,27 @@ class Slp2UdpSource implements VideoSource {
   }
 
   @override
+  Future<void> reconnect() async {
+    // This is the critical reconnect for UDP streaming after app resume
+    // The surface was destroyed when backgrounded, so we need to restart the stream
+    if (_h264Controller != null) {
+      debugPrint('Slp2UdpSource: Reconnecting H264 stream...');
+      await _h264Controller!.stopStream();
+      await Future.delayed(const Duration(milliseconds: 100));
+      final success = await _h264Controller!.startStream(port);
+      if (success) {
+        _isConnected = true;
+        _connectionStateController.add(true);
+        debugPrint('Slp2UdpSource: H264 stream reconnected');
+      } else {
+        debugPrint('Slp2UdpSource: Failed to reconnect H264 stream');
+      }
+    } else {
+      debugPrint('Slp2UdpSource: No controller to reconnect');
+    }
+  }
+
+  @override
   Future<Uint8List?> captureFrame() async {
     if (_h264Controller == null) {
       return null;
@@ -475,6 +535,15 @@ class StereoSimSource implements VideoSource {
     _initialized = false;
     _connectionStateController.add(false);
     await _source.dispose();
+  }
+
+  @override
+  Future<void> reconnect() async {
+    // Stereo sim uses media_kit which should handle reconnection
+    if (_initialized && _source.videoController != null) {
+      debugPrint('StereoSimSource: Resuming playback');
+      await _source.play();
+    }
   }
 
   @override
