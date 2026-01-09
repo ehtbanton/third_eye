@@ -31,6 +31,51 @@ class ImagePickerScreen extends StatefulWidget {
   State<ImagePickerScreen> createState() => _ImagePickerScreenState();
 }
 
+/// Wrapper widget to keep the map page alive when swiping between pages
+class _KeepAliveMapPage extends StatefulWidget {
+  final Widget child;
+
+  const _KeepAliveMapPage({required this.child});
+
+  @override
+  State<_KeepAliveMapPage> createState() => _KeepAliveMapPageState();
+}
+
+class _KeepAliveMapPageState extends State<_KeepAliveMapPage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
+  }
+}
+
+/// Wrapper widget to keep the camera page alive when swiping between pages
+/// This prevents the UDP stream from being killed when viewing the map
+class _KeepAliveCameraPage extends StatefulWidget {
+  final Widget child;
+
+  const _KeepAliveCameraPage({required this.child});
+
+  @override
+  State<_KeepAliveCameraPage> createState() => _KeepAliveCameraPageState();
+}
+
+class _KeepAliveCameraPageState extends State<_KeepAliveCameraPage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
+  }
+}
+
 class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindingObserver {
   final LlamaService _llamaService = LlamaService();
   final TtsService _ttsService = TtsService();
@@ -986,19 +1031,23 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                     setState(() => _currentPage = index);
                   },
                   children: [
-                    // Page 0: Map view
-                    MapScreen(
-                      locationService: _locationService,
-                      azureMapsService: _azureMapsService,
-                      navigationService: _navigationService,
-                      headingService: _headingService,
-                      activeRoute: _activeRoute,
-                      onRouteChanged: (route) {
-                        setState(() => _activeRoute = route);
-                      },
+                    // Page 0: Map view (wrapped to keep alive)
+                    _KeepAliveMapPage(
+                      child: MapScreen(
+                        locationService: _locationService,
+                        azureMapsService: _azureMapsService,
+                        navigationService: _navigationService,
+                        headingService: _headingService,
+                        activeRoute: _activeRoute,
+                        onRouteChanged: (route) {
+                          setState(() => _activeRoute = route);
+                        },
+                      ),
                     ),
-                    // Page 1: Camera view
-                    _buildCameraView(),
+                    // Page 1: Camera view (wrapped to keep UDP stream alive)
+                    _KeepAliveCameraPage(
+                      child: _buildCameraView(),
+                    ),
                   ],
                 ),
                 // Page indicator dots
