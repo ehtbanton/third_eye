@@ -181,7 +181,13 @@ class StereoDepthService {
       }
 
       stopwatch.stop();
-      debugPrint('StereoDepthService: Found ${points.length} depth points in ${stopwatch.elapsedMilliseconds}ms');
+      final reliablePoints = points.where((p) => p.confidence >= 0.6).toList();
+      debugPrint('StereoDepthService: Found ${points.length} points (${reliablePoints.length} reliable, conf>=0.6) in ${stopwatch.elapsedMilliseconds}ms');
+      if (reliablePoints.isNotEmpty) {
+        final avgDepth = reliablePoints.map((p) => p.depthMeters).reduce((a, b) => a + b) / reliablePoints.length;
+        final avgDisp = reliablePoints.map((p) => p.disparity).reduce((a, b) => a + b) / reliablePoints.length;
+        debugPrint('StereoDepthService: Avg depth=${avgDepth.toStringAsFixed(2)}m, avg disp=${avgDisp.toStringAsFixed(1)}px, focal=${_focalLengthPixels.toStringAsFixed(0)}px');
+      }
 
       return StereoDepthResult(
         points: points,

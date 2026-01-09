@@ -61,7 +61,7 @@ abstract class VideoSource {
 }
 
 /// Phone camera source using Flutter camera package
-class PhoneCameraSource implements VideoSource {
+class PhoneCameraSource extends VideoSource {
   CameraController? _controller;
   List<CameraDescription>? _cameras;
   bool _isConnected = false;
@@ -184,7 +184,7 @@ class PhoneCameraSource implements VideoSource {
 }
 
 /// ESP32-CAM WiFi source
-class Esp32Source implements VideoSource {
+class Esp32Source extends VideoSource {
   final Esp32WifiService _service = Esp32WifiService();
   Uint8List? _currentFrame;
   StreamSubscription<Uint8List>? _frameSubscription;
@@ -280,7 +280,7 @@ class Esp32Source implements VideoSource {
 }
 
 /// SLP2 RTSP stream source
-class Slp2RtspSource implements VideoSource {
+class Slp2RtspSource extends VideoSource {
   final Slp2StreamService _service = Slp2StreamService();
 
   @override
@@ -395,7 +395,7 @@ class Slp2RtspSource implements VideoSource {
 
 /// SLP2 Native UDP H264 source (low latency)
 /// Receives side-by-side (SBS) stereo frames from StereoPi
-class Slp2UdpSource implements VideoSource {
+class Slp2UdpSource extends VideoSource {
   final Slp2StreamService _wifiService = Slp2StreamService();
   H264VideoController? _h264Controller;
   bool _isConnected = false;
@@ -403,7 +403,10 @@ class Slp2UdpSource implements VideoSource {
   final _connectionStateController = StreamController<bool>.broadcast();
   final int port;
 
-  Slp2UdpSource({this.port = 5000});
+  // Set to true if left camera is on the RIGHT side of the SBS image
+  final bool swapLeftRight;
+
+  Slp2UdpSource({this.port = 5000, this.swapLeftRight = false});
 
   @override
   bool get isStereoSource => true; // SLP2 sends SBS stereo frames
@@ -503,13 +506,21 @@ class Slp2UdpSource implements VideoSource {
       final fullHeight = fullImage.height;
       final halfWidth = fullWidth ~/ 2;
 
-      // Split at midpoint: left half = left camera, right half = right camera
-      final leftImage = img.copyCrop(fullImage, x: 0, y: 0, width: halfWidth, height: fullHeight);
-      final rightImage = img.copyCrop(fullImage, x: halfWidth, y: 0, width: halfWidth, height: fullHeight);
+      // Split at midpoint
+      // Standard SBS: left half = left camera, right half = right camera
+      // If swapLeftRight is true, the cameras are reversed in the stream
+      img.Image leftCrop, rightCrop;
+      if (swapLeftRight) {
+        leftCrop = img.copyCrop(fullImage, x: halfWidth, y: 0, width: halfWidth, height: fullHeight);
+        rightCrop = img.copyCrop(fullImage, x: 0, y: 0, width: halfWidth, height: fullHeight);
+      } else {
+        leftCrop = img.copyCrop(fullImage, x: 0, y: 0, width: halfWidth, height: fullHeight);
+        rightCrop = img.copyCrop(fullImage, x: halfWidth, y: 0, width: halfWidth, height: fullHeight);
+      }
 
       // Encode back to JPEG
-      final leftJpeg = Uint8List.fromList(img.encodeJpg(leftImage, quality: 85));
-      final rightJpeg = Uint8List.fromList(img.encodeJpg(rightImage, quality: 85));
+      final leftJpeg = Uint8List.fromList(img.encodeJpg(leftCrop, quality: 85));
+      final rightJpeg = Uint8List.fromList(img.encodeJpg(rightCrop, quality: 85));
 
       return StereoFramePair(
         leftImage: leftJpeg,
@@ -548,7 +559,7 @@ class Slp2UdpSource implements VideoSource {
 }
 
 /// Stereo simulation video source
-class StereoSimSource implements VideoSource {
+class StereoSimSource extends VideoSource {
   final StereoVideoSource _source = StereoVideoSource();
   bool _initialized = false;
   final _connectionStateController = StreamController<bool>.broadcast();
@@ -649,7 +660,7 @@ class VideoSourceFactory {
       case CameraSource.slp2Rtsp:
         return Slp2RtspSource();
       case CameraSource.slp2Udp:
-        return Slp2UdpSource();
+        return Slp2UdpSource(swapLeftRight: true);
       case CameraSource.stereoSim:
         return StereoSimSource();
     }

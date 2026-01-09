@@ -77,20 +77,25 @@ class DepthCalibrationService {
     required List<StereoDepthPoint> stereoPoints,
     double minConfidence = 0.6,
   }) {
-    if (midasDepth.rawDepth.isEmpty || stereoPoints.isEmpty) return;
+    if (midasDepth.rawDepth.isEmpty || stereoPoints.isEmpty) {
+      debugPrint('DepthCalibrationService: No points to add (midas empty: ${midasDepth.rawDepth.isEmpty}, stereo empty: ${stereoPoints.isEmpty})');
+      return;
+    }
 
     final reliablePoints = stereoPoints.where((p) => p.confidence >= minConfidence).toList();
-    if (reliablePoints.isEmpty) return;
+    if (reliablePoints.isEmpty) {
+      debugPrint('DepthCalibrationService: No reliable stereo points (${stereoPoints.length} total, 0 with conf>=$minConfidence)');
+      return;
+    }
+
+    debugPrint('DepthCalibrationService: Processing ${reliablePoints.length} reliable stereo points (MiDaS ${midasDepth.width}x${midasDepth.height})');
+    int addedCount = 0;
 
     for (final stereoPoint in reliablePoints) {
-      // Map stereo point coordinates to MiDaS depth map coordinates
-      // Stereo and MiDaS may have different resolutions
-      final midasX = (stereoPoint.x * midasDepth.width / stereoPoints.first.x.toDouble())
-          .round()
-          .clamp(0, midasDepth.width - 1);
-      final midasY = (stereoPoint.y * midasDepth.height / stereoPoints.first.y.toDouble())
-          .round()
-          .clamp(0, midasDepth.height - 1);
+      // Points are already scaled to MiDaS coordinates by the caller
+      // (MetricDepthService._runStereoCalibration does the scaling)
+      final midasX = stereoPoint.x.clamp(0, midasDepth.width - 1);
+      final midasY = stereoPoint.y.clamp(0, midasDepth.height - 1);
 
       // Get MiDaS value at this location (sample a small region for robustness)
       final midasValue = _sampleMidasRegion(midasDepth, midasX, midasY);
@@ -104,7 +109,10 @@ class DepthCalibrationService {
         metricDepth: stereoPoint.depthMeters,
         confidence: stereoPoint.confidence,
       ));
+      addedCount++;
     }
+
+    debugPrint('DepthCalibrationService: Added $addedCount points, total: ${_recentPoints.length}/${_minPointsForCalibration} needed');
 
     // Trim old points
     while (_recentPoints.length > _maxRecentPoints) {

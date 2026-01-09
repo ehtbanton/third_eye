@@ -170,6 +170,7 @@ class MetricDepthService {
     final shouldRunStereo = _frameCount % _stereoCalibrationInterval == 0;
 
     if (shouldRunStereo) {
+      debugPrint('MetricDepthService: Running stereo calibration (frame $_frameCount)');
       if (_parallelCalibration) {
         // Run stereo in parallel (don't await, let it update calibration async)
         _runStereoCalibration(stereoPair, midasResult);
@@ -199,24 +200,35 @@ class MetricDepthService {
   /// Run stereo depth and update calibration.
   Future<void> _runStereoCalibration(StereoFramePair stereoPair, DepthMapResult midasResult) async {
     try {
+      debugPrint('MetricDepthService: Computing stereo depth (pair: ${stereoPair.width}x${stereoPair.height})');
       final stereoResult = await _stereoService.computeDepth(stereoPair);
-      if (stereoResult != null && stereoResult.points.isNotEmpty) {
-        // Scale stereo coordinates to match MiDaS resolution
-        final scaledPoints = stereoResult.points.map((p) => StereoDepthPoint(
-          x: (p.x * midasResult.width / stereoResult.imageWidth).round(),
-          y: (p.y * midasResult.height / stereoResult.imageHeight).round(),
-          disparity: p.disparity,
-          depthMeters: p.depthMeters,
-          confidence: p.confidence,
-        )).toList();
-
-        _calibrationService.addCalibrationPoints(
-          midasDepth: midasResult,
-          stereoPoints: scaledPoints,
-        );
+      if (stereoResult == null) {
+        debugPrint('MetricDepthService: Stereo computation returned null');
+        return;
       }
-    } catch (e) {
+      if (stereoResult.points.isEmpty) {
+        debugPrint('MetricDepthService: Stereo found 0 points');
+        return;
+      }
+
+      debugPrint('MetricDepthService: Stereo found ${stereoResult.points.length} points, scaling to MiDaS ${midasResult.width}x${midasResult.height}');
+
+      // Scale stereo coordinates to match MiDaS resolution
+      final scaledPoints = stereoResult.points.map((p) => StereoDepthPoint(
+        x: (p.x * midasResult.width / stereoResult.imageWidth).round(),
+        y: (p.y * midasResult.height / stereoResult.imageHeight).round(),
+        disparity: p.disparity,
+        depthMeters: p.depthMeters,
+        confidence: p.confidence,
+      )).toList();
+
+      _calibrationService.addCalibrationPoints(
+        midasDepth: midasResult,
+        stereoPoints: scaledPoints,
+      );
+    } catch (e, stack) {
       debugPrint('MetricDepthService: Stereo calibration error: $e');
+      debugPrint('MetricDepthService: Stack: $stack');
     }
   }
 
