@@ -119,6 +119,9 @@ class NavigationSessionManager extends ChangeNotifier {
       await _objectDetectionService.initialize();
       await _depthMapService.initialize();
 
+      // Placeholder value for focal length in pixels xyz    --------->           v CHANGE THIS THING
+      _depthMapService.setStereoCalibration(baselineMeters: 0.065, focalLengthPx: 700.0);
+
       // LLM service (Azure OpenAI)
       _visionLlmService = azure.CellularAzureOpenAIService();
       await _visionLlmService.initialize();

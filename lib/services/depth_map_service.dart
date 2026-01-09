@@ -1,24 +1,20 @@
+import 'dart:math' as math;
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:image/image.dart' as img;
 import 'stereo_video_source.dart';
 import 'turbo_colormap.dart';
 
-/// Result from depth map estimation.
 class DepthMapResult {
-  /// Raw depth values (float32 as bytes, row-major)
   final Float32List rawDepth;
 
-  /// Colorized depth map as RGBA bytes (ready for display)
   final Uint8List colorizedRgba;
 
-  /// Width of the depth map
   final int width;
 
-  /// Height of the depth map
   final int height;
 
-  /// Processing time in milliseconds
   final double processingTimeMs;
 
   DepthMapResult({
@@ -30,57 +26,58 @@ class DepthMapResult {
   });
 }
 
-/// Service for generating depth maps from images using MiDaS.
-///
-/// MiDaS (Mixing Datasets for Zero-shot Cross-dataset Transfer) is a
-/// monocular depth estimation network that produces depth maps from
-/// single RGB images.
-///
-/// Model: MiDaS v2.1 optimized
-/// Input: RGB image, shape (1, H, W, 3), normalized to [0, 1]
-/// Output: Depth map, shape (1, H, W)
+enum _DepthBackend { midas, hitnet }
+
 class DepthMapService {
   Interpreter? _interpreter;
   bool _isInitialized = false;
   String _accelerator = 'cpu';
 
-  // Model configuration (MiDaS v2.1 - 384x384 or auto-detected)
-  static const int defaultInputWidth = 384;
-  static const int defaultInputHeight = 384;
+  int _inputWidth = 256;
+  int _inputHeight = 256;
+  int _inputChannels = 3;
 
-  int _inputWidth = defaultInputWidth;
-  int _inputHeight = defaultInputHeight;
+  int _inputTensorCount = 1;
 
-  // Output scale factor (1.0 = full resolution, 0.5 = half, etc.)
+  _DepthBackend _backend = _DepthBackend.midas;
+
   double _outputScale = 1.0;
 
-  /// Whether the service is initialized
+  double? _stereoBaselineMeters;
+  double? _stereoFocalLengthPx;
+
   bool get isInitialized => _isInitialized;
 
-  /// Which accelerator is being used (nnapi, gpu, cpu)
   String get accelerator => _accelerator;
 
-  /// Whether GPU delegate is enabled (legacy getter)
   bool get isUsingGpu => _accelerator == 'gpu' || _accelerator == 'nnapi';
 
-  /// Model input width
   int get inputWidth => _inputWidth;
 
-  /// Model input height
   int get inputHeight => _inputHeight;
 
-  /// Output scale factor (1.0 = full resolution, 0.5 = half)
   double get outputScale => _outputScale;
   set outputScale(double value) {
     _outputScale = value.clamp(0.25, 1.0);
   }
 
-  /// Initialize the depth map service with MiDaS model.
-  ///
-  /// [modelPath] - Path to the TFLite model file in assets
-  /// [useGpuDelegate] - Whether to use hardware acceleration
+  void setStereoCalibration({
+    required double baselineMeters,
+    required double focalLengthPx,
+  }) {
+    _stereoBaselineMeters = baselineMeters;
+    _stereoFocalLengthPx = focalLengthPx;
+    debugPrint('DepthMapService: Stereo calibration set: baseline=$baselineMeters m, fx=$focalLengthPx px');
+  }
+
+  void clearStereoCalibration() {
+    _stereoBaselineMeters = null;
+    _stereoFocalLengthPx = null;
+    debugPrint('DepthMapService: Stereo calibration cleared');
+  }
+
   Future<void> initialize({
-    String modelPath = 'assets/models/midas_v21_small_256.tflite',
+    String modelPath = 'assets/models/hitnet_middlebury_480x640.tflite',
     bool useGpuDelegate = true,
   }) async {
     if (_isInitialized) {
@@ -90,54 +87,49 @@ class DepthMapService {
     debugPrint('DepthMapService: Initializing with model: $modelPath');
 
     if (useGpuDelegate) {
-      // Try GPU delegate (fastest for this model)
       try {
         await _initializeWithAccelerator(modelPath, accelerator: 'gpu');
         debugPrint('DepthMapService: Successfully initialized with GPU');
         return;
       } catch (e) {
-        debugPrint('DepthMapService: GPU initialization failed: $e');
-        _interpreter?.close();
-        _interpreter = null;
+        debugPrint('DepthMapService: GPU init failed: $e');
+      }
+
+      try {
+        await _initializeWithAccelerator(modelPath, accelerator: 'nnapi');
+        debugPrint('DepthMapService: Successfully initialized with NNAPI');
+        return;
+      } catch (e) {
+        debugPrint('DepthMapService: NNAPI init failed: $e');
       }
     }
 
-    // Fall back to CPU
-    try {
-      await _initializeWithAccelerator(modelPath, accelerator: 'cpu');
-      debugPrint('DepthMapService: Successfully initialized with CPU');
-    } catch (e, stack) {
-      debugPrint('DepthMapService: CPU initialization also failed: $e');
-      debugPrint('DepthMapService: Stack: $stack');
-      _isInitialized = false;
-      rethrow;
-    }
+    await _initializeWithAccelerator(modelPath, accelerator: 'cpu');
+    debugPrint('DepthMapService: Successfully initialized with CPU');
   }
 
   Future<void> _initializeWithAccelerator(String modelPath, {required String accelerator}) async {
-    InterpreterOptions options = InterpreterOptions();
+    final options = InterpreterOptions();
 
     if (accelerator == 'nnapi') {
-      // NNAPI - uses NPU/DSP on Android devices (Samsung NPU, Qualcomm DSP, etc.)
       options.useNnApiForAndroid = true;
+      options.threads = 2;
       _accelerator = 'nnapi';
       debugPrint('DepthMapService: NNAPI enabled for Android');
     } else if (accelerator == 'gpu') {
       final gpuDelegate = GpuDelegateV2();
       options.addDelegate(gpuDelegate);
+      options.threads = 2;
       _accelerator = 'gpu';
       debugPrint('DepthMapService: GPU delegate added');
     } else {
-      // CPU with multiple threads
       options.threads = 4;
       _accelerator = 'cpu';
       debugPrint('DepthMapService: Using CPU with 4 threads');
     }
 
-    debugPrint('DepthMapService: Loading model from asset: $modelPath');
     _interpreter = await Interpreter.fromAsset(modelPath, options: options);
 
-    // Print model info for debugging
     final inputTensors = _interpreter!.getInputTensors();
     final outputTensors = _interpreter!.getOutputTensors();
 
@@ -153,34 +145,77 @@ class DepthMapService {
       debugPrint('  [$i]: shape=${tensor.shape}, type=${tensor.type}');
     }
 
-    // Infer input dimensions from model
+    _inputTensorCount = inputTensors.length;
     if (inputTensors.isNotEmpty) {
       final inputShape = inputTensors[0].shape;
-      // Shape is typically (1, H, W, C) or (1, H, W, 6)
-      if (inputShape.length >= 3) {
+      if (inputShape.length >= 4) {
         _inputHeight = inputShape[1];
         _inputWidth = inputShape[2];
-        debugPrint('DepthMapService: Input size: ${_inputWidth}x$_inputHeight');
+        _inputChannels = inputShape[3];
+      } else if (inputShape.length >= 3) {
+        _inputHeight = inputShape[1];
+        _inputWidth = inputShape[2];
+        _inputChannels = 1;
       }
+      debugPrint('DepthMapService: Input size: ${_inputWidth}x$_inputHeight, channels=$_inputChannels, inputs=$_inputTensorCount');
     }
 
+    final looksLikeHitnet = modelPath.toLowerCase().contains('hitnet') ||
+        _inputTensorCount == 2 ||
+        (_inputTensorCount == 1 && _inputChannels == 6);
+    _backend = looksLikeHitnet ? _DepthBackend.hitnet : _DepthBackend.midas;
+
+    debugPrint('DepthMapService: Backend selected: ${_backend.name}');
     _isInitialized = true;
   }
 
-  /// Estimate depth from a stereo frame pair (uses left image for monocular depth).
-  ///
-  /// [stereoPair] - Left and right images as JPEG bytes (uses left image only)
-  /// Returns [DepthMapResult] with depth and colorized depth map
   Future<DepthMapResult?> estimateDepth(StereoFramePair stereoPair) async {
-    // Use the left image for monocular depth estimation
+    if (_backend == _DepthBackend.hitnet) {
+      return estimateStereoDepthFromPair(stereoPair.leftImage, stereoPair.rightImage);
+    }
     return estimateDepthFromImage(stereoPair.leftImage);
   }
 
-  /// Estimate depth from a single image.
-  ///
-  /// [imageBytes] - Image as JPEG bytes
-  /// Returns [DepthMapResult] with depth and colorized depth map
   Future<DepthMapResult?> estimateDepthFromImage(Uint8List imageBytes) async {
+    if (!_isInitialized || _interpreter == null) {
+      debugPrint('DepthMapService: Not initialized');
+      return null;
+    }
+
+    if (_backend == _DepthBackend.hitnet) {
+      final full = img.decodeImage(imageBytes);
+      if (full == null) {
+        debugPrint('DepthMapService: Failed to decode input image (HITNet)');
+        return null;
+      }
+
+      final canSplit = full.width.isEven && (full.width / full.height) >= 1.6;
+      if (!canSplit) {
+        debugPrint(
+          'DepthMapService: HITNet requires a stereo pair. The provided frame is ${full.width}x${full.height} '
+          'and does not look like side-by-side stereo. Returning null.',
+        );
+        return null;
+      }
+
+      final halfW = full.width ~/ 2;
+      final left = img.copyCrop(full, x: 0, y: 0, width: halfW, height: full.height);
+      final right = img.copyCrop(full, x: halfW, y: 0, width: halfW, height: full.height);
+
+      final leftJpeg = Uint8List.fromList(img.encodeJpg(left, quality: 90));
+      final rightJpeg = Uint8List.fromList(img.encodeJpg(right, quality: 90));
+
+      return estimateStereoDepthFromPair(leftJpeg, rightJpeg);
+    }
+
+    return _estimateMidasFromJpeg(imageBytes);
+  }
+
+  Future<DepthMapResult?> estimateDepthFromBytes(Uint8List imageBytes) async {
+    return estimateDepthFromImage(imageBytes);
+  }
+
+  Future<DepthMapResult?> estimateStereoDepthFromPair(Uint8List leftJpeg, Uint8List rightJpeg) async {
     if (!_isInitialized || _interpreter == null) {
       debugPrint('DepthMapService: Not initialized');
       return null;
@@ -189,20 +224,184 @@ class DepthMapService {
     final stopwatch = Stopwatch()..start();
 
     try {
-      // Decode JPEG image
-      final image = img.decodeImage(imageBytes);
-      final decodeTime = stopwatch.elapsedMilliseconds;
+      final left = img.decodeImage(leftJpeg);
+      final right = img.decodeImage(rightJpeg);
+      if (left == null || right == null) {
+        debugPrint('DepthMapService: Failed to decode stereo images');
+        return null;
+      }
 
+      final leftResized = img.copyResize(left, width: _inputWidth, height: _inputHeight);
+      final rightResized = img.copyResize(right, width: _inputWidth, height: _inputHeight);
+
+      final inputTensor = _interpreter!.getInputTensors().first;
+      final isUint8 = inputTensor.type == TfLiteType.uint8;
+
+      Object makeRgbTensor(img.Image im) {
+        if (isUint8) {
+          return List.generate(
+            1,
+            (_) => List.generate(
+              _inputHeight,
+              (y) => List.generate(
+                _inputWidth,
+                (x) {
+                  final p = im.getPixel(x, y);
+                  return <int>[p.r.toInt(), p.g.toInt(), p.b.toInt()];
+                },
+              ),
+            ),
+          );
+        } else {
+          return List.generate(
+            1,
+            (_) => List.generate(
+              _inputHeight,
+              (y) => List.generate(
+                _inputWidth,
+                (x) {
+                  final p = im.getPixel(x, y);
+                  return <double>[p.r / 255.0, p.g / 255.0, p.b / 255.0];
+                },
+              ),
+            ),
+          );
+        }
+      }
+
+      Object makeConcat6Tensor(img.Image leftIm, img.Image rightIm) {
+        if (isUint8) {
+          return List.generate(
+            1,
+            (_) => List.generate(
+              _inputHeight,
+              (y) => List.generate(
+                _inputWidth,
+                (x) {
+                  final lp = leftIm.getPixel(x, y);
+                  final rp = rightIm.getPixel(x, y);
+                  return <int>[
+                    lp.r.toInt(), lp.g.toInt(), lp.b.toInt(),
+                    rp.r.toInt(), rp.g.toInt(), rp.b.toInt(),
+                  ];
+                },
+              ),
+            ),
+          );
+        } else {
+          return List.generate(
+            1,
+            (_) => List.generate(
+              _inputHeight,
+              (y) => List.generate(
+                _inputWidth,
+                (x) {
+                  final lp = leftIm.getPixel(x, y);
+                  final rp = rightIm.getPixel(x, y);
+                  return <double>[
+                    lp.r / 255.0, lp.g / 255.0, lp.b / 255.0,
+                    rp.r / 255.0, rp.g / 255.0, rp.b / 255.0,
+                  ];
+                },
+              ),
+            ),
+          );
+        }
+      }
+
+      final Object leftInput = makeRgbTensor(leftResized);
+      final Object rightInput = makeRgbTensor(rightResized);
+
+      final outShape = _interpreter!.getOutputTensors().first.shape;
+      final outH = outShape.length >= 3 ? outShape[1] : _inputHeight;
+      final outW = outShape.length >= 3 ? outShape[2] : _inputWidth;
+
+      final output = List.generate(
+        1,
+        (_) => List.generate(
+          outH,
+          (_) => List.generate(outW, (_) => List.generate(1, (_) => 0.0)),
+        ),
+      );
+
+      if (_inputTensorCount == 2) {
+        _interpreter!.runForMultipleInputs([leftInput, rightInput], {0: output});
+      } else {
+        final input = (_inputChannels == 6) ? makeConcat6Tensor(leftResized, rightResized) : leftInput;
+        _interpreter!.run(input, output);
+      }
+
+      final outScale = _outputScale.clamp(0.25, 1.0);
+      final dispW = (outW * outScale).round().clamp(1, outW);
+      final dispH = (outH * outScale).round().clamp(1, outH);
+
+      final scaleX = outW / dispW;
+      final scaleY = outH / dispH;
+
+      final raw = Float32List(dispW * dispH);
+      final viz = List<double>.filled(dispW * dispH, 0.0);
+
+      final fx = _stereoFocalLengthPx;
+      final b = _stereoBaselineMeters;
+      const eps = 1e-6;
+
+      for (int y = 0; y < dispH; y++) {
+        for (int x = 0; x < dispW; x++) {
+          final srcX = (x * scaleX).floor().clamp(0, outW - 1);
+          final srcY = (y * scaleY).floor().clamp(0, outH - 1);
+
+          final disparity = (output[0][srcY][srcX][0] as num).toDouble();
+
+          double value;
+          if (fx != null && b != null) {
+            value = (fx * b) / math.max(disparity, eps);
+            viz[y * dispW + x] = 1.0 / math.max(value, eps);
+          } else {
+            value = disparity;
+            viz[y * dispW + x] = value;
+          }
+
+          raw[y * dispW + x] = value;
+        }
+      }
+
+      final colorized = TurboColormap.apply(viz, dispW, dispH);
+
+      stopwatch.stop();
+      debugPrint(
+        'DepthMapService(HITNet): ${stopwatch.elapsedMilliseconds}ms '
+        '[in:${_inputWidth}x$_inputHeight out:${dispW}x$dispH] $_accelerator '
+        '${(fx != null && b != null) ? "metric" : "disparity"}',
+      );
+
+      return DepthMapResult(
+        rawDepth: raw,
+        colorizedRgba: colorized,
+        width: dispW,
+        height: dispH,
+        processingTimeMs: stopwatch.elapsedMilliseconds.toDouble(),
+      );
+    } catch (e, stack) {
+      debugPrint('DepthMapService(HITNet): Inference failed: $e');
+      debugPrint('DepthMapService(HITNet): Stack: $stack');
+      return null;
+    }
+  }
+
+  Future<DepthMapResult?> _estimateMidasFromJpeg(Uint8List imageBytes) async {
+    final stopwatch = Stopwatch()..start();
+
+    try {
+      final image = img.decodeImage(imageBytes);
       if (image == null) {
         debugPrint('DepthMapService: Failed to decode input image');
         return null;
       }
+      final decodeTime = stopwatch.elapsedMilliseconds;
 
-      // Resize to model input size
       final resized = img.copyResize(image, width: _inputWidth, height: _inputHeight);
       final resizeTime = stopwatch.elapsedMilliseconds - decodeTime;
 
-      // Prepare input tensor
       final input = List.generate(
         1,
         (_) => List.generate(
@@ -210,55 +409,52 @@ class DepthMapService {
           (y) => List.generate(
             _inputWidth,
             (x) {
-              final pixel = resized.getPixel(x, y);
-              return [pixel.r / 255.0, pixel.g / 255.0, pixel.b / 255.0];
+              final p = resized.getPixel(x, y);
+              return <double>[p.r / 255.0, p.g / 255.0, p.b / 255.0];
             },
           ),
         ),
       );
       final prepTime = stopwatch.elapsedMilliseconds - resizeTime - decodeTime;
 
-      // Prepare output tensor
       final output = List.generate(
         1,
         (_) => List.generate(
           _inputHeight,
-          (_) => List.generate(_inputWidth, (_) => List.filled(1, 0.0)),
+          (_) => List.generate(_inputWidth, (_) => List.generate(1, (_) => 0.0)),
         ),
       );
 
-      // Run inference
       _interpreter!.run(input, output);
-      final inferTime = stopwatch.elapsedMilliseconds - prepTime - resizeTime - decodeTime;
+      final inferTime = stopwatch.elapsedMilliseconds;
 
-      // Calculate output dimensions with downscaling
-      final outWidth = (_inputWidth * _outputScale).round();
-      final outHeight = (_inputHeight * _outputScale).round();
+      final outScale = _outputScale.clamp(0.25, 1.0);
+      final outWidth = (_inputWidth * outScale).round().clamp(1, _inputWidth);
+      final outHeight = (_inputHeight * outScale).round().clamp(1, _inputHeight);
 
-      // Extract and downsample depth values
-      final depth = Float32List(outWidth * outHeight);
       final scaleX = _inputWidth / outWidth;
       final scaleY = _inputHeight / outHeight;
+
+      final depth = Float32List(outWidth * outHeight);
 
       for (int y = 0; y < outHeight; y++) {
         for (int x = 0; x < outWidth; x++) {
           final srcX = (x * scaleX).floor().clamp(0, _inputWidth - 1);
           final srcY = (y * scaleY).floor().clamp(0, _inputHeight - 1);
-          depth[y * outWidth + x] = output[0][srcY][srcX][0].toDouble();
+          depth[y * outWidth + x] = (output[0][srcY][srcX][0] as num).toDouble();
         }
       }
 
-      // Colorize with TURBO colormap at reduced resolution
-      final colorized = TurboColormap.apply(
-        depth.toList(),
-        outWidth,
-        outHeight,
-      );
+      final colorized = TurboColormap.apply(depth.toList(), outWidth, outHeight);
 
       stopwatch.stop();
       final colorTime = stopwatch.elapsedMilliseconds - inferTime - prepTime - resizeTime - decodeTime;
 
-      debugPrint('DepthMapService: ${stopwatch.elapsedMilliseconds}ms total [decode:$decodeTime resize:$resizeTime prep:$prepTime infer:$inferTime color:$colorTime] (${outWidth}x$outHeight) $_accelerator');
+      debugPrint(
+        'DepthMapService(MiDaS): ${stopwatch.elapsedMilliseconds}ms '
+        '[decode:$decodeTime resize:$resizeTime prep:$prepTime infer:${inferTime - prepTime - resizeTime - decodeTime} color:$colorTime] '
+        '(${outWidth}x$outHeight) $_accelerator',
+      );
 
       return DepthMapResult(
         rawDepth: depth,
@@ -268,20 +464,12 @@ class DepthMapService {
         processingTimeMs: stopwatch.elapsedMilliseconds.toDouble(),
       );
     } catch (e, stack) {
-      debugPrint('DepthMapService: Inference failed: $e');
-      debugPrint('DepthMapService: Stack: $stack');
+      debugPrint('DepthMapService(MiDaS): Inference failed: $e');
+      debugPrint('DepthMapService(MiDaS): Stack: $stack');
       return null;
     }
   }
 
-  /// Estimate depth from raw image bytes (convenience method).
-  ///
-  /// [imageBytes] - Image as JPEG bytes
-  Future<DepthMapResult?> estimateDepthFromBytes(Uint8List imageBytes) async {
-    return estimateDepthFromImage(imageBytes);
-  }
-
-  /// Dispose of resources.
   void dispose() {
     debugPrint('DepthMapService: Disposing...');
     _interpreter?.close();
