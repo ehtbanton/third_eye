@@ -235,7 +235,7 @@ class DepthMapService {
       final rightResized = img.copyResize(right, width: _inputWidth, height: _inputHeight);
 
       final inputTensor = _interpreter!.getInputTensors().first;
-      final isUint8 = inputTensor.type == TfLiteType.uint8;
+      final isUint8 = inputTensor.type == TensorType.uint8;
 
       Object makeRgbTensor(img.Image im) {
         if (isUint8) {
