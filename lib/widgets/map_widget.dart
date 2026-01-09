@@ -1,15 +1,19 @@
 import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import '../services/location_service.dart';
 import '../services/azure_maps_service.dart';
+import '../services/heading_service.dart';
 import '../models/route_info.dart';
 
 class AzureMapsWidget extends StatefulWidget {
   final LocationService locationService;
   final AzureMapsService azureMapsService;
+  final HeadingService? headingService;
   final RouteInfo? activeRoute;
   final Function(RouteInfo?)? onRouteChanged;
   final Function(AzureMapsController)? onControllerReady;
@@ -18,6 +22,7 @@ class AzureMapsWidget extends StatefulWidget {
     super.key,
     required this.locationService,
     required this.azureMapsService,
+    this.headingService,
     this.activeRoute,
     this.onRouteChanged,
     this.onControllerReady,
@@ -30,7 +35,9 @@ class AzureMapsWidget extends StatefulWidget {
 class _AzureMapsWidgetState extends State<AzureMapsWidget> {
   final MapController _mapController = MapController();
   StreamSubscription<Position>? _locationSubscription;
+  StreamSubscription<HeadingData>? _headingSubscription;
   LatLng? _currentLocation;
+  double? _currentHeading; // Compass heading in degrees (0-360)
   bool _autoFollow = true;
   bool _isLoading = false;
   RouteInfo? _currentRoute;
@@ -83,6 +90,15 @@ class _AzureMapsWidgetState extends State<AzureMapsWidget> {
         _mapController.move(newLocation, _mapController.camera.zoom);
       }
     });
+
+    // Listen to heading updates
+    if (widget.headingService != null) {
+      _headingSubscription = widget.headingService!.headingStream.listen((headingData) {
+        setState(() {
+          _currentHeading = headingData.heading;
+        });
+      });
+    }
 
     // Notify controller ready
     widget.onControllerReady?.call(AzureMapsController(
@@ -152,7 +168,53 @@ class _AzureMapsWidgetState extends State<AzureMapsWidget> {
   @override
   void dispose() {
     _locationSubscription?.cancel();
+    _headingSubscription?.cancel();
     super.dispose();
+  }
+
+  /// Build location marker with heading direction indicator
+  Widget _buildLocationMarkerWithHeading() {
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        // Heading cone/direction indicator
+        if (_currentHeading != null)
+          Transform.rotate(
+            angle: (_currentHeading! * math.pi / 180), // Convert degrees to radians
+            child: CustomPaint(
+              size: const Size(60, 60),
+              painter: _HeadingConePainter(),
+            ),
+          ),
+        // Center dot (current location)
+        Container(
+          width: 20,
+          height: 20,
+          decoration: BoxDecoration(
+            color: Colors.blue,
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 3),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.3),
+                blurRadius: 4,
+                spreadRadius: 1,
+              ),
+            ],
+          ),
+        ),
+        // Pulsing accuracy circle
+        Container(
+          width: 50,
+          height: 50,
+          decoration: BoxDecoration(
+            color: Colors.blue.withValues(alpha: 0.15),
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.blue.withValues(alpha: 0.3), width: 1),
+          ),
+        ),
+      ],
+    );
   }
 
   @override
@@ -257,28 +319,15 @@ class _AzureMapsWidgetState extends State<AzureMapsWidget> {
                 }).whereType<Marker>().toList(),
               ),
 
-            // Current location marker
+            // Current location marker with heading indicator
             if (_currentLocation != null)
               MarkerLayer(
                 markers: [
                   Marker(
                     point: _currentLocation!,
-                    width: 40,
-                    height: 40,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.blue.withValues(alpha: 0.3),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.blue, width: 2),
-                      ),
-                      child: const Center(
-                        child: Icon(
-                          Icons.my_location,
-                          color: Colors.blue,
-                          size: 20,
-                        ),
-                      ),
-                    ),
+                    width: 60,
+                    height: 60,
+                    child: _buildLocationMarkerWithHeading(),
                   ),
                   // Destination marker
                   if (_currentRoute != null)
@@ -401,4 +450,35 @@ class AzureMapsController {
     required this.setAutoFollow,
     required this.clearRoute,
   });
+}
+
+/// Custom painter for heading direction cone
+class _HeadingConePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final paint = Paint()
+      ..color = Colors.blue.withValues(alpha: 0.4)
+      ..style = PaintingStyle.fill;
+
+    // Draw a cone/triangle pointing up (north)
+    // The transform.rotate in the parent widget will rotate this
+    final path = ui.Path();
+    path.moveTo(center.dx, center.dy - 28); // Top point (ahead)
+    path.lineTo(center.dx - 12, center.dy); // Bottom left
+    path.lineTo(center.dx + 12, center.dy); // Bottom right
+    path.close();
+
+    canvas.drawPath(path, paint);
+
+    // Draw outline
+    final outlinePaint = Paint()
+      ..color = Colors.blue.withValues(alpha: 0.7)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    canvas.drawPath(path, outlinePaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

@@ -74,10 +74,11 @@ class NavigationGuidanceService {
   // Track last spoken turn instruction to avoid repetition
   String? _lastSpokenTurnInstruction;
   DateTime? _lastTurnInstructionTime;
-  static const Duration turnInstructionCooldown = Duration(seconds: 10);
+  static const Duration turnInstructionCooldown = Duration(seconds: 4); // Reduced for more frequent guidance
+  static const Duration urgentTurnCooldown = Duration(seconds: 2); // Even faster for severe off-course
 
   static const double proximityThresholdMeters = 20.0;
-  static const double headingGuidanceThreshold = 30.0; // Speak turn when > 30 degrees off
+  static const double headingGuidanceThreshold = 20.0; // Speak turn when > 20 degrees off (more sensitive)
 
   NavigationGuidanceService({
     required TtsService ttsService,
@@ -178,18 +179,34 @@ class NavigationGuidanceService {
     // Speak turn instruction if significantly off course
     if (headingDelta.abs() > headingGuidanceThreshold) {
       final instruction = _headingService.getTurnInstruction(headingDelta);
+      final isUrgent = headingDelta.abs() > 60; // Severe off-course
+
+      // Use shorter cooldown for urgent situations
+      final cooldown = isUrgent ? urgentTurnCooldown : turnInstructionCooldown;
 
       // Check cooldown to avoid spamming
       final now = DateTime.now();
+      final timeSinceLastInstruction = _lastTurnInstructionTime != null
+          ? now.difference(_lastTurnInstructionTime!)
+          : const Duration(days: 1);
+
+      // Speak if: different instruction, or cooldown elapsed, or urgent and hasn't been said recently
       final shouldSpeak = _lastSpokenTurnInstruction != instruction ||
-          _lastTurnInstructionTime == null ||
-          now.difference(_lastTurnInstructionTime!) > turnInstructionCooldown;
+          timeSinceLastInstruction > cooldown ||
+          (isUrgent && timeSinceLastInstruction > urgentTurnCooldown);
 
       if (shouldSpeak) {
-        _ttsService.speak(instruction);
+        // Add urgency prefix for severe off-course
+        final spokenText = isUrgent ? '$instruction now!' : instruction;
+        _ttsService.speak(spokenText);
         _lastSpokenTurnInstruction = instruction;
         _lastTurnInstructionTime = now;
-        print('Heading guidance: $instruction (delta: ${headingDelta.toStringAsFixed(1)})');
+        print('Heading guidance: $spokenText (delta: ${headingDelta.toStringAsFixed(1)}°, urgent: $isUrgent)');
+      }
+    } else {
+      // Reset when back on course so we'll speak again if they go off course
+      if (headingDelta.abs() < 10) {
+        _lastSpokenTurnInstruction = null;
       }
     }
 

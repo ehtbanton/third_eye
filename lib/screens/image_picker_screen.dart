@@ -991,6 +991,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                       locationService: _locationService,
                       azureMapsService: _azureMapsService,
                       navigationService: _navigationService,
+                      headingService: _headingService,
                       activeRoute: _activeRoute,
                       onRouteChanged: (route) {
                         setState(() => _activeRoute = route);

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/location_service.dart';
 import '../services/azure_maps_service.dart';
 import '../services/navigation_guidance_service.dart';
+import '../services/heading_service.dart';
 import '../widgets/map_widget.dart';
 import '../models/route_info.dart';
 
@@ -9,6 +10,7 @@ class MapScreen extends StatefulWidget {
   final LocationService locationService;
   final AzureMapsService azureMapsService;
   final NavigationGuidanceService navigationService;
+  final HeadingService headingService;
   final RouteInfo? activeRoute;
   final Function(RouteInfo?)? onRouteChanged;
 
@@ -17,6 +19,7 @@ class MapScreen extends StatefulWidget {
     required this.locationService,
     required this.azureMapsService,
     required this.navigationService,
+    required this.headingService,
     this.activeRoute,
     this.onRouteChanged,
   });
@@ -57,6 +60,97 @@ class _MapScreenState extends State<MapScreen> {
     widget.onRouteChanged?.call(route);
   }
 
+  /// Build prominent turn guidance overlay
+  Widget _buildTurnGuidanceOverlay() {
+    final delta = _guidanceState!.headingDelta!;
+    final absDelta = delta.abs();
+
+    // Don't show if roughly on course
+    if (absDelta < 15) {
+      return const SizedBox.shrink();
+    }
+
+    // Determine turn direction and intensity
+    final isRight = delta > 0;
+    final icon = isRight ? Icons.turn_right : Icons.turn_left;
+
+    String instruction;
+    Color backgroundColor;
+    double iconSize;
+
+    if (absDelta > 150) {
+      instruction = 'TURN AROUND';
+      backgroundColor = Colors.red;
+      iconSize = 80;
+    } else if (absDelta > 60) {
+      instruction = isRight ? 'TURN RIGHT' : 'TURN LEFT';
+      backgroundColor = Colors.orange;
+      iconSize = 70;
+    } else if (absDelta > 30) {
+      instruction = isRight ? 'SLIGHT RIGHT' : 'SLIGHT LEFT';
+      backgroundColor = Colors.amber;
+      iconSize = 60;
+    } else {
+      instruction = isRight ? 'Adjust right' : 'Adjust left';
+      backgroundColor = Colors.yellow.shade700;
+      iconSize = 50;
+    }
+
+    return Positioned(
+      top: 60,
+      left: 20,
+      right: 20,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+        decoration: BoxDecoration(
+          color: backgroundColor,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.3),
+              blurRadius: 8,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              color: Colors.white,
+              size: iconSize,
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    instruction,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Text(
+                    '${absDelta.round()}° off course',
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 16,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasActiveRoute = widget.activeRoute != null;
@@ -71,6 +165,7 @@ class _MapScreenState extends State<MapScreen> {
                 AzureMapsWidget(
                   locationService: widget.locationService,
                   azureMapsService: widget.azureMapsService,
+                  headingService: widget.headingService,
                   activeRoute: widget.activeRoute,
                   onRouteChanged: _handleRouteChanged,
                   onControllerReady: (controller) {
@@ -79,6 +174,10 @@ class _MapScreenState extends State<MapScreen> {
                     });
                   },
                 ),
+
+                // PROMINENT TURN GUIDANCE OVERLAY
+                if (_guidanceState != null && _guidanceState!.headingDelta != null)
+                  _buildTurnGuidanceOverlay(),
 
                 // Re-center FAB
                 Positioned(
