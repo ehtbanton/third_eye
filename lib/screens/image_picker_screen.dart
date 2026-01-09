@@ -17,6 +17,7 @@ import '../services/heading_service.dart';
 import '../services/video_source.dart';
 import '../services/depth_map_service.dart';
 import '../services/object_detection_service.dart';
+import '../services/obstacle_warning_service.dart';
 import '../widgets/depth_map_painter.dart';
 import '../widgets/object_detection_painter.dart';
 import '../models/detected_object.dart';
@@ -130,6 +131,13 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   Timer? _detectionProcessingTimer;
   double _lastDetectionProcessingTime = 0;
 
+  // Obstacle warning service for navigation safety
+  ObstacleWarningService? _obstacleWarningService;
+  Timer? _obstacleWarningTimer;
+  bool _isProcessingObstacleWarning = false;
+  ObstacleAnalysisResult? _lastObstacleAnalysis;
+  DepthMapResult? _lastDepthResult; // Cached for obstacle analysis
+
   @override
   void initState() {
     super.initState();
@@ -210,6 +218,9 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         locationService: _locationService,
         headingService: _headingService,
       );
+
+      // Initialize obstacle warning service
+      _obstacleWarningService = ObstacleWarningService(ttsService: _ttsService);
 
       // Initialize map services (async, non-blocking)
       _azureMapsService.initialize().then((success) {
@@ -569,6 +580,105 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   void _stopDetectionProcessing() {
     _detectionProcessingTimer?.cancel();
     _detectionProcessingTimer = null;
+  }
+
+  /// Start obstacle warning processing (runs during navigation)
+  void _startObstacleWarningProcessing() {
+    if (_obstacleWarningTimer != null) return;
+    if (_obstacleWarningService == null) {
+      debugPrint('ObstacleWarning: Service not initialized');
+      return;
+    }
+    if (_currentSource?.isConnected != true) {
+      debugPrint('ObstacleWarning: No video source connected');
+      return;
+    }
+    if (!_depthMapService.isInitialized) {
+      debugPrint('ObstacleWarning: Depth map service not initialized');
+      return;
+    }
+
+    debugPrint('Starting obstacle warning processing');
+    _obstacleWarningService!.reset();
+
+    // Process at ~3 FPS for obstacle warnings (balance between responsiveness and performance)
+    _obstacleWarningTimer = Timer.periodic(
+      const Duration(milliseconds: 333),
+      (_) => _processObstacleWarningFrame(),
+    );
+  }
+
+  /// Stop obstacle warning processing
+  void _stopObstacleWarningProcessing() {
+    _obstacleWarningTimer?.cancel();
+    _obstacleWarningTimer = null;
+    _lastObstacleAnalysis = null;
+    debugPrint('Stopped obstacle warning processing');
+  }
+
+  /// Process a frame for obstacle warnings
+  Future<void> _processObstacleWarningFrame() async {
+    if (_isProcessingObstacleWarning || _currentSource?.isConnected != true) return;
+    if (_obstacleWarningService == null || !_depthMapService.isInitialized) return;
+
+    _isProcessingObstacleWarning = true;
+
+    try {
+      // Capture frame
+      final frame = await _currentSource!.captureFrame();
+      if (frame == null) {
+        _isProcessingObstacleWarning = false;
+        return;
+      }
+
+      // Run depth estimation
+      final depthResult = await _depthMapService.estimateDepthFromImage(frame);
+      if (depthResult == null) {
+        _isProcessingObstacleWarning = false;
+        return;
+      }
+
+      _lastDepthResult = depthResult;
+
+      // Optionally run YOLO detection for object identification
+      List<DetectedObject>? detections;
+      if (_objectDetectionService.isInitialized) {
+        final decoded = img.decodeJpg(frame);
+        if (decoded != null) {
+          final detectionResult = await _objectDetectionService.detectObjects(
+            frame,
+            imageWidth: decoded.width,
+            imageHeight: decoded.height,
+          );
+          detections = detectionResult?.detections;
+        }
+      }
+
+      // Analyze obstacles
+      final analysis = _obstacleWarningService!.analyzeFrame(
+        depthMap: depthResult,
+        detections: detections,
+      );
+
+      _lastObstacleAnalysis = analysis;
+
+      // Speak warnings (service handles cooldowns)
+      _obstacleWarningService!.speakWarnings(analysis);
+
+      // Log for debugging
+      if (analysis.obstacles.isNotEmpty) {
+        debugPrint('ObstacleWarning: Found ${analysis.obstacles.length} obstacles');
+        for (final obstacle in analysis.obstacles) {
+          debugPrint('  - $obstacle');
+        }
+      }
+
+    } catch (e, stack) {
+      debugPrint('ObstacleWarning processing error: $e');
+      debugPrint('Stack: $stack');
+    } finally {
+      _isProcessingObstacleWarning = false;
+    }
   }
 
   /// Process a single detection frame
@@ -1002,6 +1112,7 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
     _stopDepthProcessing();
     _objectDetectionService.dispose();
     _stopDetectionProcessing();
+    _stopObstacleWarningProcessing();
     super.dispose();
   }
 
@@ -1041,6 +1152,12 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
                         activeRoute: _activeRoute,
                         onRouteChanged: (route) {
                           setState(() => _activeRoute = route);
+                          // Start/stop obstacle warnings based on navigation state
+                          if (route != null) {
+                            _startObstacleWarningProcessing();
+                          } else {
+                            _stopObstacleWarningProcessing();
+                          }
                         },
                       ),
                     ),
