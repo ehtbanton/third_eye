@@ -17,7 +17,7 @@ import '../services/heading_service.dart';
 import '../services/video_source.dart';
 import '../services/depth_map_service.dart';
 import '../services/object_detection_service.dart';
-import '../services/obstacle_warning_service.dart';
+import '../services/obstacle_fusion_service.dart';
 import '../widgets/depth_map_painter.dart';
 import '../widgets/object_detection_painter.dart';
 import '../models/detected_object.dart';
@@ -131,11 +131,11 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   Timer? _detectionProcessingTimer;
   double _lastDetectionProcessingTime = 0;
 
-  // Obstacle warning service for navigation safety
-  ObstacleWarningService? _obstacleWarningService;
+  // Obstacle fusion service for navigation safety (YOLO + depth)
+  ObstacleFusionService? _obstacleFusionService;
   Timer? _obstacleWarningTimer;
   bool _isProcessingObstacleWarning = false;
-  ObstacleAnalysisResult? _lastObstacleAnalysis;
+  List<ObstacleWarning>? _lastObstacleWarnings;
   DepthMapResult? _lastDepthResult; // Cached for obstacle analysis
 
   @override
@@ -219,8 +219,8 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
         headingService: _headingService,
       );
 
-      // Initialize obstacle warning service
-      _obstacleWarningService = ObstacleWarningService(ttsService: _ttsService);
+      // Initialize obstacle fusion service (YOLO-first, then depth check)
+      _obstacleFusionService = ObstacleFusionService(ttsService: _ttsService);
 
       // Initialize map services (async, non-blocking)
       _azureMapsService.initialize().then((success) {
@@ -585,21 +585,21 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   /// Start obstacle warning processing (runs during navigation)
   void _startObstacleWarningProcessing() {
     if (_obstacleWarningTimer != null) return;
-    if (_obstacleWarningService == null) {
-      debugPrint('ObstacleWarning: Service not initialized');
+    if (_obstacleFusionService == null) {
+      debugPrint('ObstacleFusion: Service not initialized');
       return;
     }
     if (_currentSource?.isConnected != true) {
-      debugPrint('ObstacleWarning: No video source connected');
+      debugPrint('ObstacleFusion: No video source connected');
       return;
     }
     if (!_depthMapService.isInitialized) {
-      debugPrint('ObstacleWarning: Depth map service not initialized');
+      debugPrint('ObstacleFusion: Depth map service not initialized');
       return;
     }
 
-    debugPrint('Starting obstacle warning processing');
-    _obstacleWarningService!.reset();
+    debugPrint('Starting obstacle fusion processing (YOLO + depth)');
+    _obstacleFusionService!.reset();
 
     // Process at ~3 FPS for obstacle warnings (balance between responsiveness and performance)
     _obstacleWarningTimer = Timer.periodic(
@@ -612,14 +612,15 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
   void _stopObstacleWarningProcessing() {
     _obstacleWarningTimer?.cancel();
     _obstacleWarningTimer = null;
-    _lastObstacleAnalysis = null;
-    debugPrint('Stopped obstacle warning processing');
+    _lastObstacleWarnings = null;
+    debugPrint('Stopped obstacle fusion processing');
   }
 
-  /// Process a frame for obstacle warnings
+  /// Process a frame for obstacle warnings using YOLO-first approach
   Future<void> _processObstacleWarningFrame() async {
     if (_isProcessingObstacleWarning || _currentSource?.isConnected != true) return;
-    if (_obstacleWarningService == null || !_depthMapService.isInitialized) return;
+    if (_obstacleFusionService == null || !_depthMapService.isInitialized) return;
+    if (!_objectDetectionService.isInitialized) return; // YOLO required
 
     _isProcessingObstacleWarning = true;
 
@@ -627,6 +628,27 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
       // Capture frame
       final frame = await _currentSource!.captureFrame();
       if (frame == null) {
+        _isProcessingObstacleWarning = false;
+        return;
+      }
+
+      // Decode to get dimensions
+      final decoded = img.decodeJpg(frame);
+      if (decoded == null) {
+        _isProcessingObstacleWarning = false;
+        return;
+      }
+
+      // Run YOLO detection first
+      final detectionResult = await _objectDetectionService.detectObjects(
+        frame,
+        imageWidth: decoded.width,
+        imageHeight: decoded.height,
+      );
+
+      if (detectionResult == null || detectionResult.detections.isEmpty) {
+        // No objects detected - no warnings needed
+        _lastObstacleWarnings = [];
         _isProcessingObstacleWarning = false;
         return;
       }
@@ -640,41 +662,27 @@ class _ImagePickerScreenState extends State<ImagePickerScreen> with WidgetsBindi
 
       _lastDepthResult = depthResult;
 
-      // Optionally run YOLO detection for object identification
-      List<DetectedObject>? detections;
-      if (_objectDetectionService.isInitialized) {
-        final decoded = img.decodeJpg(frame);
-        if (decoded != null) {
-          final detectionResult = await _objectDetectionService.detectObjects(
-            frame,
-            imageWidth: decoded.width,
-            imageHeight: decoded.height,
-          );
-          detections = detectionResult?.detections;
-        }
-      }
-
-      // Analyze obstacles
-      final analysis = _obstacleWarningService!.analyzeFrame(
-        depthMap: depthResult,
-        detections: detections,
+      // Fuse YOLO detections with depth - only warns about close objects
+      final warnings = _obstacleFusionService!.detectHazards(
+        detectionResult.detections,
+        depthResult,
       );
 
-      _lastObstacleAnalysis = analysis;
+      _lastObstacleWarnings = warnings;
 
       // Speak warnings (service handles cooldowns)
-      _obstacleWarningService!.speakWarnings(analysis);
+      _obstacleFusionService!.speakWarnings(warnings);
 
       // Log for debugging
-      if (analysis.obstacles.isNotEmpty) {
-        debugPrint('ObstacleWarning: Found ${analysis.obstacles.length} obstacles');
-        for (final obstacle in analysis.obstacles) {
-          debugPrint('  - $obstacle');
+      if (warnings.isNotEmpty) {
+        debugPrint('ObstacleFusion: Found ${warnings.length} close objects');
+        for (final warning in warnings) {
+          debugPrint('  - ${warning.objectName} ${warning.position} (dist=${warning.distanceScore.toStringAsFixed(2)})');
         }
       }
 
     } catch (e, stack) {
-      debugPrint('ObstacleWarning processing error: $e');
+      debugPrint('ObstacleFusion processing error: $e');
       debugPrint('Stack: $stack');
     } finally {
       _isProcessingObstacleWarning = false;

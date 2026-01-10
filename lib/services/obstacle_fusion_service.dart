@@ -1,7 +1,8 @@
-import 'dart:math';
 import 'dart:ui';
+import 'package:flutter/foundation.dart';
 import '../models/detected_object.dart';
 import 'depth_map_service.dart';
+import 'tts_service.dart';
 
 enum ObstaclePosition { left, center, right }
 
@@ -29,11 +30,23 @@ class ObstacleWarning {
 }
 
 class ObstacleFusionService {
-  
+  final TtsService? _ttsService;
+
   // Heuristic: If object depth is in the top 20% of the scene's max depth, it's "close".
   // This avoids calibration issues with MiDaS.
   static const double relativeDepthThreshold = 0.8;
-  
+
+  // Warning cooldowns per position to avoid spam
+  final Map<ObstaclePosition, DateTime> _lastWarningTime = {};
+  static const Duration criticalCooldown = Duration(seconds: 2);
+  static const Duration normalCooldown = Duration(seconds: 5);
+
+  // Track last spoken warning to avoid exact repeats
+  String? _lastWarningMessage;
+  DateTime? _lastWarningMessageTime;
+
+  ObstacleFusionService({TtsService? ttsService}) : _ttsService = ttsService;
+
   List<ObstacleWarning> detectHazards(List<DetectedObject> detections, DepthMapResult depthMap) {
     List<ObstacleWarning> warnings = [];
 
@@ -117,5 +130,57 @@ class ObstacleFusionService {
     if (centerX < 0.35) return ObstaclePosition.left;
     if (centerX > 0.65) return ObstaclePosition.right;
     return ObstaclePosition.center;
+  }
+
+  /// Speak warnings for detected obstacles (with cooldown management)
+  void speakWarnings(List<ObstacleWarning> warnings) {
+    if (_ttsService == null || warnings.isEmpty) return;
+
+    final now = DateTime.now();
+
+    // Priority 1: Critical obstacles (very close center obstacles)
+    final criticalWarnings = warnings.where((w) => w.isCritical).toList();
+    if (criticalWarnings.isNotEmpty) {
+      final warning = criticalWarnings.first;
+      if (_canWarnForPosition(warning.position, criticalCooldown, now)) {
+        _speak(warning.announcement);
+        _lastWarningTime[warning.position] = now;
+      }
+      return;
+    }
+
+    // Priority 2: Normal warnings (closest first - already sorted)
+    if (warnings.isNotEmpty) {
+      final warning = warnings.first;
+      if (_canWarnForPosition(warning.position, normalCooldown, now)) {
+        _speak(warning.announcement);
+        _lastWarningTime[warning.position] = now;
+      }
+    }
+  }
+
+  bool _canWarnForPosition(ObstaclePosition position, Duration cooldown, DateTime now) {
+    final lastTime = _lastWarningTime[position];
+    if (lastTime == null) return true;
+    return now.difference(lastTime) >= cooldown;
+  }
+
+  void _speak(String message) {
+    if (_lastWarningMessage == message &&
+        _lastWarningMessageTime != null &&
+        DateTime.now().difference(_lastWarningMessageTime!) < const Duration(seconds: 2)) {
+      return;
+    }
+    debugPrint('ObstacleFusion: $message');
+    _ttsService?.speak(message);
+    _lastWarningMessage = message;
+    _lastWarningMessageTime = DateTime.now();
+  }
+
+  /// Reset cooldowns (e.g., when navigation restarts)
+  void reset() {
+    _lastWarningTime.clear();
+    _lastWarningMessage = null;
+    _lastWarningMessageTime = null;
   }
 }
